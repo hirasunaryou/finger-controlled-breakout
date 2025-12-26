@@ -9,12 +9,15 @@ as a fallback for development and troubleshooting.
 from __future__ import annotations
 
 import math
+import random
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pygame
 
+from src.calibration import PersistedState, persist_state
 from src.control_types import ControlSource, ControlState
 
 
@@ -34,6 +37,10 @@ PADDLE_SPEED = 540  # Keyboard fallback speed in pixels per second.
 LIVES = 3
 TRAIL_LENGTH = 14
 FLASH_DURATION = 0.18
+SHAKE_DECAY = 6.0
+PARTICLE_LIFETIME = 0.5
+PARTICLE_COUNT = 12
+PARTICLE_SPEED = 260
 
 
 @dataclass
@@ -42,6 +49,15 @@ class Brick:
 
     rect: pygame.Rect
     color: Tuple[int, int, int]
+
+
+@dataclass
+class Particle:
+    """Tiny circle used for brick-break bursts."""
+
+    position: pygame.Vector2
+    velocity: pygame.Vector2
+    lifetime: float
 
 
 class Paddle:
@@ -102,12 +118,13 @@ class Ball:
 class Game:
     """Encapsulates the Breakout game loop and rendering."""
 
-    def __init__(self) -> None:
+    def __init__(self, persisted_state: Optional[PersistedState] = None) -> None:
         pygame.init()
         pygame.display.set_caption("Finger-Controlled Breakout")
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("arial", 24)
+        self.big_font = pygame.font.SysFont("arial", 36, bold=True)
 
         self.paddle = Paddle()
         self.ball = Ball()
@@ -116,9 +133,34 @@ class Game:
         self.lives = LIVES
         # Ball starts stuck to the paddle until the player launches it.
         self.ball_stuck = True
+        self.ball_caught = False
+        self.caught_offset = 0.0
         self.ball_trail: Deque[pygame.Vector2] = deque(maxlen=TRAIL_LENGTH)
         self.hit_flash_timer = 0.0
         self.hit_flash_position: Optional[pygame.Vector2] = None
+        self.particles: List[Particle] = []
+        self.shake_offset = pygame.Vector2(0, 0)
+        self.shake_timer = 0.0
+
+        # Persistence
+        self.persisted_state = persisted_state or PersistedState()
+        self.best_score = self.persisted_state.best_score
+        self.last_score = self.persisted_state.last_score
+
+        # Lightweight generated sound effects (simple sine beeps).
+        self.sounds = {}
+        try:
+            pygame.mixer.init()
+            self.sounds = {
+                "paddle": self._generate_tone(660, 0.08),
+                "brick": self._generate_tone(880, 0.09),
+                "wall": self._generate_tone(520, 0.06),
+                "life_lost": self._generate_tone(180, 0.18),
+                "catch": self._generate_tone(320, 0.1),
+            }
+        except pygame.error:
+            # Audio can fail in some headless environments; gameplay continues without sound.
+            self.sounds = {}
 
     @staticmethod
     def _create_bricks() -> List[Brick]:
@@ -143,29 +185,54 @@ class Game:
                 bricks.append(Brick(rect, color))
         return bricks
 
+    def _generate_tone(self, frequency: float, duration: float) -> pygame.mixer.Sound:
+        """Create a short sine wave beep without external assets."""
+
+        sample_rate = 22050
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        tone = 0.4 * np.sin(2 * math.pi * frequency * t)
+        # Simple fade-out to prevent clicks.
+        tone *= np.linspace(1, 0.2, tone.size)
+        audio = np.int16(tone * 32767)
+        return pygame.mixer.Sound(audio)
+
     def _handle_wall_collisions(self) -> None:
         """Bounce off screen edges and detect when the ball is lost."""
 
         if self.ball.rect.left <= 0 or self.ball.rect.right >= SCREEN_WIDTH:
             self.ball.velocity.x *= -1
+            self._play_sound("wall")
         if self.ball.rect.top <= 0:
             self.ball.velocity.y *= -1
+            self._play_sound("wall")
         if self.ball.rect.bottom >= SCREEN_HEIGHT:
             self.lives -= 1
             self.ball.reset(self.paddle.rect)
             self.ball_stuck = True
+            self.ball_caught = False
             self.ball_trail.clear()
+            self._trigger_shake(intensity=10.0)
+            self._play_sound("life_lost")
 
-    def _handle_paddle_collision(self) -> None:
-        """Reflect the ball with slight angle adjustments based on impact point."""
+    def _handle_paddle_collision(self, catch_active: bool) -> None:
+        """Reflect the ball or catch it depending on the current input."""
 
         if self.ball.rect.colliderect(self.paddle.rect) and self.ball.velocity.y > 0:
+            if catch_active:
+                # Stick the ball to the paddle until the player releases pinch/space.
+                self.ball_caught = True
+                self.caught_offset = self.ball.position.x - self.paddle.rect.centerx
+                self.ball.velocity.update(0, 0)
+                self._play_sound("catch")
+                return
+
             overlap_center = self.ball.position.x - self.paddle.rect.centerx
             angle = max(-math.pi / 3, min(math.pi / 3, overlap_center / (PADDLE_WIDTH / 2) * (math.pi / 3)))
             speed = self.ball.velocity.length() or BALL_SPEED
             self.ball.velocity = pygame.Vector2(speed * math.sin(angle), -abs(speed * math.cos(angle)))
             self.hit_flash_position = pygame.Vector2(self.ball.position)
             self.hit_flash_timer = FLASH_DURATION
+            self._play_sound("paddle")
 
     def _handle_brick_collisions(self) -> None:
         """Remove bricks on impact and bounce the ball."""
@@ -177,17 +244,42 @@ class Game:
                 self.ball.velocity.y *= -1
                 self.hit_flash_position = pygame.Vector2(brick.rect.center)
                 self.hit_flash_timer = FLASH_DURATION
+                self._spawn_particles(pygame.Vector2(brick.rect.center))
+                self._play_sound("brick")
+                self._trigger_shake(intensity=6.0)
                 break
 
-    def _draw_hud(self) -> None:
+    def _spawn_particles(self, position: pygame.Vector2) -> None:
+        """Emit a handful of tiny particles when a brick breaks."""
+
+        for _ in range(PARTICLE_COUNT):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(PARTICLE_SPEED * 0.4, PARTICLE_SPEED)
+            velocity = pygame.Vector2(math.cos(angle) * speed, math.sin(angle) * speed)
+            self.particles.append(Particle(position=position.copy(), velocity=velocity, lifetime=PARTICLE_LIFETIME))
+
+    def _update_particles(self, dt: float) -> None:
+        """Advance and decay brick-break particles."""
+
+        alive: List[Particle] = []
+        for particle in self.particles:
+            particle.lifetime -= dt
+            if particle.lifetime <= 0:
+                continue
+            particle.position += particle.velocity * dt
+            particle.velocity *= 0.92
+            alive.append(particle)
+        self.particles = alive
+
+    def _draw_hud(self, surface: pygame.Surface) -> None:
         """Render score and lives in the top bar."""
 
         score_text = self.font.render(f"Score: {self.score}", True, (240, 240, 240))
         lives_text = self.font.render(f"Lives: {self.lives}", True, (240, 240, 240))
-        self.screen.blit(score_text, (20, 12))
-        self.screen.blit(lives_text, (SCREEN_WIDTH - 120, 12))
+        surface.blit(score_text, (20, 12))
+        surface.blit(lives_text, (SCREEN_WIDTH - 120, 12))
 
-    def _draw_trail(self) -> None:
+    def _draw_trail(self, surface: pygame.Surface) -> None:
         """Render a fading trail behind the moving ball for visual polish."""
 
         if len(self.ball_trail) < 2:
@@ -198,9 +290,9 @@ class Game:
             alpha = int(255 * (1 - (i / len(self.ball_trail))))
             radius = max(3, BALL_RADIUS - i // 2)
             pygame.draw.circle(trail_surface, (255, 255, 255, max(30, alpha // 3)), (int(pos.x), int(pos.y)), radius)
-        self.screen.blit(trail_surface, (0, 0))
+        surface.blit(trail_surface, (0, 0))
 
-    def _draw_hit_flash(self, dt: float) -> None:
+    def _draw_hit_flash(self, dt: float, surface: pygame.Surface) -> None:
         """Draw a brief ring when the ball hits the paddle or a brick."""
 
         if self.hit_flash_timer <= 0.0 or self.hit_flash_position is None:
@@ -217,33 +309,72 @@ class Game:
             radius,
             width=3,
         )
-        self.screen.blit(flash_surface, (0, 0))
+        surface.blit(flash_surface, (0, 0))
         self.hit_flash_timer = max(0.0, self.hit_flash_timer - dt)
 
     def _draw_entities(self, dt: float) -> None:
         """Clear the screen and draw bricks, paddle, and ball."""
 
-        self.screen.fill((15, 15, 25))
+        canvas = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        canvas.fill((15, 15, 25))
         for brick in self.bricks:
-            pygame.draw.rect(self.screen, brick.color, brick.rect, border_radius=4)
-        pygame.draw.rect(self.screen, (200, 200, 200), self.paddle.rect, border_radius=4)
-        self._draw_trail()
-        pygame.draw.circle(self.screen, (255, 255, 255), (int(self.ball.position.x), int(self.ball.position.y)), BALL_RADIUS)
-        self._draw_hit_flash(dt)
-        self._draw_hud()
+            pygame.draw.rect(canvas, brick.color, brick.rect, border_radius=4)
+        for particle in self.particles:
+            alpha = int(255 * (particle.lifetime / PARTICLE_LIFETIME))
+            pygame.draw.circle(
+                canvas,
+                (255, 255, 200, alpha),
+                (int(particle.position.x), int(particle.position.y)),
+                4,
+            )
+        pygame.draw.rect(canvas, (200, 200, 200), self.paddle.rect, border_radius=4)
+        self._draw_trail(canvas)
+        pygame.draw.circle(canvas, (255, 255, 255), (int(self.ball.position.x), int(self.ball.position.y)), BALL_RADIUS)
+        self._draw_hit_flash(dt, canvas)
+        self._draw_hud(canvas)
+
+        offset = (int(self.shake_offset.x), int(self.shake_offset.y))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(canvas, offset)
+
+    def _play_sound(self, key: str) -> None:
+        sound = self.sounds.get(key)
+        if sound:
+            sound.play()
+
+    def _trigger_shake(self, intensity: float) -> None:
+        """Start a brief camera shake by animating an offset."""
+
+        self.shake_timer = 0.2
+        angle = random.uniform(0, 2 * math.pi)
+        self.shake_offset = pygame.Vector2(math.cos(angle), math.sin(angle)) * intensity
+
+    def _update_shake(self, dt: float) -> None:
+        if self.shake_timer <= 0:
+            self.shake_offset.update(0, 0)
+            return
+        self.shake_timer = max(0.0, self.shake_timer - dt)
+        self.shake_offset *= math.exp(-SHAKE_DECAY * dt)
 
     def run(self, control_source: Optional[ControlSource] = None) -> None:
         """Main game loop that consumes ``ControlState`` frames."""
 
-        running = True
+        running = self._show_start_screen(control_source)
         while running:
             dt = self.clock.tick(60) / 1000.0
+            self._update_shake(dt)
+            self._update_particles(dt)
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_c and control_source:
+                    try:
+                        control_source.toggle_calibration()
+                    except Exception:
+                        pass
 
             control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
             if control_source:
@@ -266,22 +397,42 @@ class Game:
             if direction != 0.0:
                 self.paddle.move_with_keyboard(direction, dt)
 
+            catch_hold = control_state.pinch or keys[pygame.K_SPACE] or keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+
             # While stuck, keep the ball attached to the paddle and watch for launch gestures.
             launch_requested = control_state.pinch_pressed or keys[pygame.K_SPACE]
             if self.ball_stuck:
                 self.ball.position = pygame.Vector2(self.paddle.rect.centerx, self.paddle.rect.top - BALL_RADIUS - 2)
                 if launch_requested:
                     self.ball_stuck = False
+                    self.ball_caught = False
                     self.ball.velocity = pygame.Vector2(BALL_SPEED * math.cos(math.pi / 4), -BALL_SPEED)
+                    self._play_sound("paddle")
                 self.ball_trail.clear()
+            elif self.ball_caught:
+                # Keep the ball locked to the paddle at the capture offset.
+                self.ball.position = pygame.Vector2(
+                    max(self.paddle.rect.left + BALL_RADIUS, min(self.paddle.rect.right - BALL_RADIUS, self.paddle.rect.centerx + self.caught_offset)),
+                    self.paddle.rect.top - BALL_RADIUS - 2,
+                )
+                if not catch_hold or control_state.pinch_released:
+                    # Launch with angle based on where the ball was caught.
+                    overlap_center = self.ball.position.x - self.paddle.rect.centerx
+                    angle = max(-math.pi / 3, min(math.pi / 3, overlap_center / (PADDLE_WIDTH / 2) * (math.pi / 3)))
+                    speed = BALL_SPEED
+                    self.ball.velocity = pygame.Vector2(speed * math.sin(angle), -abs(speed * math.cos(angle)))
+                    self.ball_caught = False
+                    self.ball_trail.clear()
+                    self._play_sound("paddle")
             else:
                 self.ball.update(dt)
 
             if not self.ball_stuck:
-                self._handle_wall_collisions()
-                self._handle_paddle_collision()
-                self._handle_brick_collisions()
-                self.ball_trail.append(pygame.Vector2(self.ball.position))
+                if not self.ball_caught:
+                    self._handle_wall_collisions()
+                    self._handle_paddle_collision(catch_hold)
+                    self._handle_brick_collisions()
+                    self.ball_trail.append(pygame.Vector2(self.ball.position))
 
             if self.lives <= 0 or not self.bricks:
                 running = False
@@ -289,6 +440,7 @@ class Game:
             self._draw_entities(dt)
             pygame.display.flip()
 
+        self._finalize_scores()
         self._show_end_screen()
         pygame.quit()
 
@@ -308,3 +460,60 @@ class Game:
             self.screen.fill((0, 0, 0))
             self.screen.blit(prompt, rect)
             pygame.display.flip()
+
+    def _show_start_screen(self, control_source: Optional[ControlSource]) -> bool:
+        """Wait for pinch/space to start and show score history."""
+
+        waiting = True
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    return False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_c and control_source:
+                    try:
+                        control_source.toggle_calibration()
+                    except Exception:
+                        pass
+
+            control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
+            if control_source:
+                try:
+                    control_state = control_source.read()
+                except Exception:
+                    control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
+            keys = pygame.key.get_pressed()
+            if control_state.x is not None:
+                self.paddle.move_to_normalized(control_state.x)
+            direction = 0.0
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                direction -= 1.0
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                direction += 1.0
+            if direction != 0.0:
+                self.paddle.move_with_keyboard(direction, 1 / 60)
+
+            start_requested = control_state.pinch_pressed or keys[pygame.K_SPACE]
+            if start_requested:
+                waiting = False
+
+            self.screen.fill((10, 10, 20))
+            title = self.big_font.render("Pinch or Space to Start", True, (255, 255, 255))
+            best = self.font.render(f"Best Score: {self.best_score}", True, (210, 210, 210))
+            last = self.font.render(f"Last Score: {self.last_score}", True, (180, 180, 180))
+            hint = self.font.render("Press C to calibrate (camera mode)", True, (180, 220, 255))
+            self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 40)))
+            self.screen.blit(best, best.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 8)))
+            self.screen.blit(last, last.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 40)))
+            self.screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 90)))
+            pygame.display.flip()
+        return True
+
+    def _finalize_scores(self) -> None:
+        """Update persisted score values once per session."""
+
+        self.best_score = max(self.best_score, self.score)
+        self.last_score = self.score
+        latest = persist_state(best_score=self.best_score, last_score=self.last_score)
+        self.persisted_state = latest

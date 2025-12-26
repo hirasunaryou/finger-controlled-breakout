@@ -10,9 +10,12 @@ keep the design clean and testable.
 - Palm-center hand tracking is the default, providing stable horizontal control.
 - Optional index-fingertip control for a more direct feel.
 - Pinch gesture (thumb–index) launches or relaunches the ball; Space still works as a keyboard backup.
+- Pinch + paddle contact can now *catch* the ball; release to angle your shot. Holding `Space`/`Shift` does the same.
 - Exponential moving average smoothing to reduce jitter in the control signal.
 - Keyboard controls remain available as a fallback for development or `--no-camera`.
 - Tasteful visuals: ball trail and brief hit flash on paddle/brick contact.
+- Start screen shows last/best score, with local best-score persistence.
+- Camera calibration flow (press `C`) to map your personal left/right reach.
 
 ## Quick start (Windows 11 / Python 3.12)
 1. Ensure Python 3.12 and pip are installed.
@@ -36,11 +39,12 @@ keep the design clean and testable.
    ```
 
 ## Controls
-- With camera: Move your palm left/right (default) or use index fingertip; pinch (thumb-index) to launch/relaunch.
-- Keyboard fallback: Arrow keys or `A/D` move the paddle; Space launches; `Esc` quits.
+- With camera: Move your palm left/right (default) or use index fingertip; pinch (thumb-index) to launch/relaunch. Hold pinch while catching the ball with the paddle to stick it, then release to fire.
+- Keyboard fallback: Arrow keys or `A/D` move the paddle; Space launches; holding `Space` or `Shift` catches; `Esc` quits.
 - Mirror input when needed: `python -m src.main --mirror`
-- Adjust smoothing if motion feels too snappy or sluggish: `python -m src.main --smoothing-alpha 0.15`
+- Adjust smoothing if motion feels too snappy or sluggish: `python -m src.main --smoothing-alpha 0.15 --smoothing-deadzone 0.01`
 - Show the debug overlay for hand detection and FPS: `python -m src.main --show-debug-overlay`
+- Calibrate camera reach: run camera mode, press `C`, then follow the prompts: pinch at your leftmost comfortable point, then pinch at the rightmost point. The values save to `~/.finger_breakout.json` and load automatically.
 
 ## CLI options (examples)
 - Force keyboard-only mode:
@@ -67,6 +71,7 @@ keep the design clean and testable.
 | `--no-camera` | `False` | Disable camera control and rely on keyboard input. |
 | `--control-mode {palm,index}` | `palm` | Choose palm center (stable) or index fingertip (direct) tracking. |
 | `--smoothing-alpha FLOAT` | `0.25` | EMA smoothing factor for hand x-position (`0-1`, higher = snappier). |
+| `--smoothing-deadzone FLOAT` | `0.01` | Ignore tiny x-changes before smoothing to reduce jitter. |
 | `--mirror` | `False` | Mirror horizontal input, useful if the paddle moves opposite your hand. |
 | `--pinch-on-threshold FLOAT` | `0.17` | Normalized thumb–index distance below which pinch becomes active. |
 | `--pinch-off-threshold FLOAT` | `0.22` | Normalized thumb–index distance above which pinch releases. |
@@ -82,6 +87,7 @@ keep the design clean and testable.
 ## Tips
 - Use `--no-camera` to develop or play without the camera.
 - Adjust smoothing to taste with `--smoothing-alpha 0.15` (lower = smoother).
+- Run calibration (`C`) if the paddle hits the wall before your hand reaches the frame edge.
 - Good lighting and keeping your hand within the frame improve detection stability.
 - If MediaPipe wheels give trouble on Windows/Python 3.12, pin versions from `requirements.txt` and install via `python -m pip install --upgrade pip` first.
 
