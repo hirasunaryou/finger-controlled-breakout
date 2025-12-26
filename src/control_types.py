@@ -50,6 +50,9 @@ class ControlSource(Protocol):
     def toggle_calibration(self) -> None:  # pragma: no cover - optional extension point
         ...
 
+    def reset_calibration(self) -> None:  # pragma: no cover - optional extension point
+        ...
+
 
 @dataclass
 class ExponentialSmoother:

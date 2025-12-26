@@ -20,6 +20,9 @@ from typing import Any, Dict, Optional
 
 
 STATE_PATH = Path.home() / ".finger_breakout.json"
+# Sentinel to allow callers to explicitly clear calibration without
+# overloading ``None`` (which legitimately represents "no calibration").
+_CALIBRATION_UNSET = object()
 
 
 @dataclass
@@ -87,16 +90,22 @@ def load_state(path: Path = STATE_PATH) -> PersistedState:
 
 def persist_state(
     *,
-    calibration: Optional[Calibration] = None,
+    calibration: Optional[Calibration] | object = _CALIBRATION_UNSET,
     best_score: Optional[int] = None,
     last_score: Optional[int] = None,
     path: Path = STATE_PATH,
 ) -> PersistedState:
-    """Merge incoming values with any existing file and write it back to disk."""
+    """Merge incoming values with any existing file and write it back to disk.
+
+    ``calibration`` accepts ``None`` to intentionally clear saved calibration, while
+    the private ``_CALIBRATION_UNSET`` sentinel means "leave calibration as-is".
+    This keeps the API flexible for the debug overlay shortcuts without breaking
+    existing callers that only care about score persistence.
+    """
 
     current = load_state(path)
-    if calibration is not None:
-        current.calibration = calibration
+    if calibration is not _CALIBRATION_UNSET:
+        current.calibration = calibration  # may be ``None`` to clear the file
     if best_score is not None:
         current.best_score = max(current.best_score, int(best_score))
     if last_score is not None:

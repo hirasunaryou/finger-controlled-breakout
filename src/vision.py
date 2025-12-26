@@ -39,7 +39,9 @@ class VisionControlSource(ControlSource):
         min_detection_confidence: float = 0.6,
         min_tracking_confidence: float = 0.5,
         mirror: bool = False,
+        rotate: int = 0,
         flip_x: bool = False,
+        flip_y: bool = False,
         control_mode: str = "palm",
         pinch_on_threshold: float = 0.17,
         pinch_off_threshold: float = 0.22,
@@ -66,7 +68,9 @@ class VisionControlSource(ControlSource):
         self.smoother = ExponentialSmoother(alpha=smoothing_alpha, dead_zone=smoothing_deadzone)
         self.pinch_tracker = PinchTracker(on_threshold=pinch_on_threshold, off_threshold=pinch_off_threshold)
         self.mirror = mirror
-        self.flip_x = flip_x
+        self.rotate = rotate
+        self.flip_camera_x = flip_x
+        self.flip_camera_y = flip_y
         self.control_mode = control_mode
         self.show_debug_overlay = show_debug_overlay
         self.last_time = time.time()
@@ -76,6 +80,7 @@ class VisionControlSource(ControlSource):
         self.calibration: Optional[Calibration] = self.persisted_state.calibration
         self.calibration_mode = False
         self.calibration_progress: Tuple[Optional[float], Optional[float]] = (None, None)
+        self.calibration_error: Optional[str] = None
         # Preparing a dedicated window name keeps calibration discoverable.
         self.window_name = "Control Debug"
 
@@ -84,6 +89,42 @@ class VisionControlSource(ControlSource):
 
         self.calibration_mode = not self.calibration_mode
         self.calibration_progress = (None, None)
+        self.calibration_error = None
+
+    def reset_calibration(self) -> None:
+        """Clear calibration both in-memory and on disk for a clean slate."""
+
+        self.calibration = None
+        self.calibration_progress = (None, None)
+        self.calibration_error = None
+        self.persisted_state = persist_state(
+            calibration=None,
+            best_score=self.persisted_state.best_score,
+            last_score=self.persisted_state.last_score,
+        )
+
+    def _transform_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Rotate/flip the camera frame before inference and overlay.
+
+        The transforms happen up front so MediaPipe receives the same view the
+        user sees in the debug window, keeping x-values intuitive when the
+        webcam feed is upside-down or mirrored by default.
+        """
+
+        transformed = frame
+        if self.rotate == 90:
+            transformed = cv2.rotate(transformed, cv2.ROTATE_90_CLOCKWISE)
+        elif self.rotate == 180:
+            transformed = cv2.rotate(transformed, cv2.ROTATE_180)
+        elif self.rotate == 270:
+            transformed = cv2.rotate(transformed, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        if self.flip_camera_x:
+            transformed = cv2.flip(transformed, 1)
+        if self.flip_camera_y:
+            transformed = cv2.flip(transformed, 0)
+
+        return transformed
 
     def _compute_hand_scale(self, landmarks: list[mp.framework.formats.landmark_pb2.NormalizedLandmark]) -> float:
         wrist = landmarks[0]
@@ -124,8 +165,7 @@ class VisionControlSource(ControlSource):
             # Prefer confident detections; tie-break with proximity to previous x.
             distance_bonus = 0.0
             if self.last_x is not None:
-                comparable_x = 1.0 - raw_x if self.flip_x else raw_x
-                distance_bonus = max(0.0, 1.0 - abs(comparable_x - self.last_x))
+                distance_bonus = max(0.0, 1.0 - abs(raw_x - self.last_x))
             score = confidence + 0.1 * distance_bonus
             if score > best_score:
                 best_score = score
@@ -135,7 +175,13 @@ class VisionControlSource(ControlSource):
         return chosen, confidence
 
     def _update_calibration(self, pinch_state: ControlState, raw_x: Optional[float]) -> None:
-        """Handle the guided two-step calibration when the user presses 'C'."""
+        """Handle the guided two-step calibration when the user presses 'C'.
+
+        The flow is intentionally explicit:
+        1) Wait for a pinch on the left edge to capture ``x_left``.
+        2) Wait for a pinch on the right edge to capture ``x_right``.
+        3) Validate that the span is usable before persisting to disk.
+        """
 
         if not self.calibration_mode:
             return
@@ -145,17 +191,28 @@ class VisionControlSource(ControlSource):
         left, right = self.calibration_progress
         if left is None and pinch_state.pinch_pressed:
             left = raw_x
+            self.calibration_error = None
         elif left is not None and right is None and pinch_state.pinch_pressed:
             right = raw_x
 
         self.calibration_progress = (left, right)
 
         if left is not None and right is not None:
-            # Persist and exit calibration.
+            # Require a small span to avoid divide-by-zero and confusing mappings.
+            if right <= left + 0.02:
+                self.calibration_error = "Right must be to the right of left; try again."
+                self.calibration_progress = (None, None)
+                return
+
             self.calibration = Calibration(x_left=left, x_right=right)
-            self.persisted_state = persist_state(calibration=self.calibration, best_score=self.persisted_state.best_score)
+            self.persisted_state = persist_state(
+                calibration=self.calibration,
+                best_score=self.persisted_state.best_score,
+                last_score=self.persisted_state.last_score,
+            )
             self.calibration_mode = False
             self.calibration_progress = (None, None)
+            self.calibration_error = None
 
     def _draw_calibration_overlay(self, frame: np.ndarray) -> None:
         """Show step-by-step prompts over the camera preview."""
@@ -164,59 +221,111 @@ class VisionControlSource(ControlSource):
             return
 
         prompt = (
-            "Move hand to LEFT edge + pinch"
+            "Step 1: Move hand to LEFT edge and pinch"
             if self.calibration_progress[0] is None
-            else "Move hand to RIGHT edge + pinch"
+            else "Step 2: Move hand to RIGHT edge and pinch"
         )
-        cv2.putText(frame, "CALIBRATION MODE", (18, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        cv2.putText(frame, "CALIBRATION MODE (C to exit)", (18, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
         cv2.putText(frame, prompt, (18, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(
+            frame,
+            "Aim for a wide span; press R to clear saved calibration.",
+            (18, 82),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (200, 220, 255),
+            2,
+        )
 
     def _overlay_debug(
         self,
         frame: np.ndarray,
-        x: Optional[float],
+        raw_x: Optional[float],
+        calibrated_x: Optional[float],
+        smoothed_x: Optional[float],
         pinch_state: ControlState,
         detected: bool,
+        landmarks: Optional[list[mp.framework.formats.landmark_pb2.NormalizedLandmark]],
     ) -> None:
-        """Draw lightweight overlay for troubleshooting."""
+        """Draw rich overlay so players can self-debug without reading code."""
 
-        cv2.putText(
-            frame,
-            f"Detected: {detected}",
-            (12, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0) if detected else (0, 0, 255),
-            2,
+        height, width, _ = frame.shape
+
+        # 1) Stick picture: landmarks and bones to reassure that MediaPipe sees the hand.
+        if landmarks is not None:
+            mp_solutions.drawing_utils.draw_landmarks(
+                frame,
+                landmarks,
+                mp_solutions.hands.HAND_CONNECTIONS,
+                mp_solutions.drawing_styles.get_default_hand_landmarks_style(),
+                mp_solutions.drawing_styles.get_default_hand_connections_style(),
+            )
+        else:
+            cv2.putText(
+                frame,
+                "NO HAND",
+                (max(8, width // 2 - 70), height // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                3,
+            )
+
+        # 2) Vertical guides for raw and calibrated x positions.
+        if raw_x is not None:
+            cv2.line(
+                frame,
+                (int(raw_x * width), 0),
+                (int(raw_x * width), height),
+                (255, 255, 0),
+                2,
+            )
+        if calibrated_x is not None:
+            cv2.line(
+                frame,
+                (int(calibrated_x * width), 0),
+                (int(calibrated_x * width), height),
+                (0, 255, 255),
+                2,
+            )
+        if smoothed_x is not None:
+            cv2.line(
+                frame,
+                (int(smoothed_x * width), 0),
+                (int(smoothed_x * width), height),
+                (0, 200, 120),
+                1,
+            )
+
+        # 3) Textual debug heads-up display.
+        lines = []
+        step_label = "Idle"
+        if self.calibration_mode:
+            step_label = "Waiting LEFT pinch" if self.calibration_progress[0] is None else "Waiting RIGHT pinch"
+        lines.append(f"Calibration: {'ON' if self.calibration_mode else 'OFF'} (C to toggle, R to reset)")
+        lines.append(f"Step: {step_label}")
+        lines.append(f"Raw x: {raw_x:.3f}" if raw_x is not None else "Raw x: None")
+        lines.append(f"Calibrated x: {calibrated_x:.3f}" if calibrated_x is not None else "Calibrated x: None")
+        lines.append(f"Smoothed x: {smoothed_x:.3f}" if smoothed_x is not None else "Smoothed x: None")
+        lines.append(f"Pinch: {pinch_state.pinch}")
+        lines.append(f"Pressed: {pinch_state.pinch_pressed} / Released: {pinch_state.pinch_released}")
+        lines.append(
+            f"Confidence: {pinch_state.confidence:.2f}" if pinch_state.confidence is not None else "Confidence: n/a"
         )
-        cv2.putText(
-            frame,
-            f"Conf: {pinch_state.confidence:.2f}" if pinch_state.confidence is not None else "Conf: n/a",
-            (12, 46),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (180, 220, 255),
-            1,
-        )
-        cv2.putText(
-            frame,
-            f"x: {x:.2f}" if x is not None else "x: None",
-            (12, 74),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-        )
-        cv2.putText(frame, f"Pinch: {pinch_state.pinch}", (12, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cv2.putText(frame, f"Pressed: {pinch_state.pinch_pressed}", (12, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f"Released: {pinch_state.pinch_released}", (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
 
         now = time.time()
         dt = now - self.last_time
         if dt > 0:
             self.last_fps = 0.9 * self.last_fps + 0.1 * (1.0 / dt)
         self.last_time = now
-        cv2.putText(frame, f"FPS: {self.last_fps:.1f}", (12, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 255), 2)
+        lines.append(f"FPS: {self.last_fps:.1f}")
+
+        if self.calibration_error:
+            lines.append(f"Error: {self.calibration_error}")
+
+        for idx, text in enumerate(lines):
+            y = 24 + idx * 20
+            cv2.putText(frame, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
     def read(self) -> ControlState:
         success, frame = self.cap.read()
@@ -231,12 +340,14 @@ class VisionControlSource(ControlSource):
                 confidence=None,
             )
 
+        frame = self._transform_frame(frame)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_frame.flags.writeable = False
         results = self.hands.process(rgb_frame)
 
         x_value: Optional[float]
         raw_x_for_calibration: Optional[float] = None
+        calibrated_for_overlay: Optional[float] = None
         pinch_state = ControlState(
             x=None,
             pinch=self.pinch_tracker.active,
@@ -244,6 +355,7 @@ class VisionControlSource(ControlSource):
             pinch_released=False,
             confidence=None,
         )
+        chosen_landmarks: Optional[list[mp.framework.formats.landmark_pb2.NormalizedLandmark]] = None
 
         if results.multi_hand_landmarks and results.multi_handedness:
             chosen, confidence = self._pick_hand(results.multi_hand_landmarks, results.multi_handedness)
@@ -255,19 +367,18 @@ class VisionControlSource(ControlSource):
             raw_x = max(0.0, min(1.0, raw_x))
 
             raw_x_for_calibration = raw_x
-            calibrated_x = apply_calibration(raw_x, self.calibration)
-            x_value = self.smoother.update(calibrated_x)
-            if self.flip_x and x_value is not None:
-                x_value = 1.0 - x_value
+            calibrated_for_overlay = apply_calibration(raw_x, self.calibration)
+            x_value = self.smoother.update(calibrated_for_overlay)
 
             scale = self._compute_hand_scale(chosen)
             pinch_distance = self._compute_pinch_distance(chosen) / scale
             pinch_state = self.pinch_tracker.update(pinch_distance)
             pinch_state.confidence = confidence
+            chosen_landmarks = chosen
 
             # Keep the last usable x for multi-hand handoff scoring.
-            if x_value is not None:
-                self.last_x = x_value
+            if raw_x_for_calibration is not None:
+                self.last_x = raw_x_for_calibration
         else:
             x_value = self.smoother.update(None)
             pinch_state = self.pinch_tracker.update(None)
@@ -277,7 +388,15 @@ class VisionControlSource(ControlSource):
 
         if self.show_debug_overlay or self.calibration_mode:
             debug_frame = frame.copy()
-            self._overlay_debug(debug_frame, x_value, pinch_state, results.multi_hand_landmarks is not None)
+            self._overlay_debug(
+                debug_frame,
+                raw_x_for_calibration,
+                calibrated_for_overlay,
+                x_value,
+                pinch_state,
+                results.multi_hand_landmarks is not None,
+                chosen_landmarks,
+            )
             self._draw_calibration_overlay(debug_frame)
             cv2.imshow(self.window_name, debug_frame)
             key = cv2.waitKey(1) & 0xFF
@@ -286,6 +405,8 @@ class VisionControlSource(ControlSource):
             if key == ord("c"):
                 # Toggle calibration; reset progress each time to keep it simple.
                 self.toggle_calibration()
+            if key == ord("r"):
+                self.reset_calibration()
 
         return ControlState(
             x=x_value,

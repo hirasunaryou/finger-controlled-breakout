@@ -432,6 +432,11 @@ class Game:
                         control_source.toggle_calibration()
                     except Exception:
                         pass
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_r and control_source:
+                    try:
+                        control_source.reset_calibration()
+                    except Exception:
+                        pass
 
             control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
             if control_source:

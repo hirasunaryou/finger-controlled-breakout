@@ -1,6 +1,7 @@
 import math
+from pathlib import Path
 
-from src.calibration import Calibration, apply_calibration
+from src.calibration import Calibration, apply_calibration, load_state, persist_state
 from src.control_types import ExponentialSmoother
 from src.pinch import PinchTracker
 
@@ -33,3 +34,23 @@ def test_calibration_mapping_and_clamp() -> None:
     assert apply_calibration(1.0, calib) == 1.0
     # When no calibration is present, values are simply clamped.
     assert apply_calibration(-0.2, None) == 0.0
+
+
+def test_persist_state_can_clear_and_keep_calibration(tmp_path: Path) -> None:
+    """Saving should allow clearing calibration explicitly without forcing callers to edit JSON."""
+
+    temp_file = tmp_path / "state.json"
+    calib = Calibration(x_left=0.1, x_right=0.9)
+    persist_state(calibration=calib, path=temp_file)
+    saved = load_state(temp_file)
+    assert saved.calibration is not None
+    # Clearing calibration should wipe it while preserving scores.
+    persist_state(calibration=None, best_score=5, path=temp_file)
+    cleared = load_state(temp_file)
+    assert cleared.calibration is None
+    assert cleared.best_score == 5
+    # Omitting calibration should keep the cleared state intact.
+    persist_state(best_score=10, path=temp_file)
+    kept = load_state(temp_file)
+    assert kept.calibration is None
+    assert kept.best_score == 10
