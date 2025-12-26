@@ -57,7 +57,14 @@ def main() -> None:
         help="Dead zone applied before smoothing to reduce micro jitter.",
     )
     parser.add_argument("--control-mode", choices=["palm", "index"], default="palm", help="Use palm center or index tip.")
-    parser.add_argument("--mirror", action="store_true", help="Mirror the horizontal input (useful for some cameras).")
+    parser.add_argument("--mirror", action="store_true", help="Mirror the horizontal input before calibration.")
+    parser.add_argument("--flip-x", action="store_true", help="Flip the final normalized x after smoothing (screen mirroring).")
+    parser.add_argument(
+        "--pinch-threshold",
+        type=float,
+        default=None,
+        help="Single distance threshold that sets pinch on/off hysteresis automatically.",
+    )
     parser.add_argument(
         "--pinch-on-threshold",
         type=float,
@@ -89,12 +96,19 @@ def main() -> None:
         else:
             # Register resource cleanup immediately so camera handles are released
             # even if the game loop raises unexpectedly.
+            pinch_on = args.pinch_on_threshold if args.pinch_threshold is None else args.pinch_threshold
+            pinch_off = (
+                args.pinch_off_threshold
+                if args.pinch_threshold is None
+                else args.pinch_threshold * 1.3
+            )
             control_source = VisionControlSource(
                 smoothing_alpha=args.smoothing_alpha,
                 mirror=args.mirror,
+                flip_x=args.flip_x,
                 control_mode=args.control_mode,
-                pinch_on_threshold=args.pinch_on_threshold,
-                pinch_off_threshold=args.pinch_off_threshold,
+                pinch_on_threshold=pinch_on,
+                pinch_off_threshold=pinch_off,
                 show_debug_overlay=args.show_debug_overlay,
                 smoothing_deadzone=args.smoothing_deadzone,
                 persisted_state=persisted_state,

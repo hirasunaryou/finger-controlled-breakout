@@ -16,18 +16,26 @@ from typing import Optional, Protocol
 class ControlState:
     """Represents the current input state for a single frame.
 
+    This intentionally bundles both pose (normalized ``x``) and gesture
+    information so the vision layer can grow without forcing the game loop to
+    learn MediaPipe-specific details. ``confidence`` is kept optional to avoid
+    punishing keyboard-only fallback and tests.
+
     Attributes:
         x: Normalized horizontal position ``[0, 1]`` for the paddle. ``None``
             indicates that no reliable position was detected this frame.
         pinch: Whether the pinch gesture is currently considered active.
         pinch_pressed: Rising edge for the pinch gesture (``False`` -> ``True``).
         pinch_released: Falling edge for the pinch gesture (``True`` -> ``False``).
+        confidence: Optional per-frame tracking confidence. ``None`` when the
+            source cannot provide one (keyboard mode, failed detection, etc.).
     """
 
     x: Optional[float]
     pinch: bool
     pinch_pressed: bool
     pinch_released: bool
+    confidence: Optional[float] = None
 
 
 class ControlSource(Protocol):

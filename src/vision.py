@@ -24,6 +24,7 @@ class VisionControlSource(ControlSource):
         min_detection_confidence: float = 0.6,
         min_tracking_confidence: float = 0.5,
         mirror: bool = False,
+        flip_x: bool = False,
         control_mode: str = "palm",
         pinch_on_threshold: float = 0.17,
         pinch_off_threshold: float = 0.22,
@@ -46,6 +47,7 @@ class VisionControlSource(ControlSource):
         self.smoother = ExponentialSmoother(alpha=smoothing_alpha, dead_zone=smoothing_deadzone)
         self.pinch_tracker = PinchTracker(on_threshold=pinch_on_threshold, off_threshold=pinch_off_threshold)
         self.mirror = mirror
+        self.flip_x = flip_x
         self.control_mode = control_mode
         self.show_debug_overlay = show_debug_overlay
         self.last_time = time.time()
@@ -103,7 +105,8 @@ class VisionControlSource(ControlSource):
             # Prefer confident detections; tie-break with proximity to previous x.
             distance_bonus = 0.0
             if self.last_x is not None:
-                distance_bonus = max(0.0, 1.0 - abs(raw_x - self.last_x))
+                comparable_x = 1.0 - raw_x if self.flip_x else raw_x
+                distance_bonus = max(0.0, 1.0 - abs(comparable_x - self.last_x))
             score = confidence + 0.1 * distance_bonus
             if score > best_score:
                 best_score = score
@@ -169,8 +172,17 @@ class VisionControlSource(ControlSource):
         )
         cv2.putText(
             frame,
+            f"Conf: {pinch_state.confidence:.2f}" if pinch_state.confidence is not None else "Conf: n/a",
+            (12, 46),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (180, 220, 255),
+            1,
+        )
+        cv2.putText(
+            frame,
             f"x: {x:.2f}" if x is not None else "x: None",
-            (12, 48),
+            (12, 74),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (255, 255, 255),
@@ -190,7 +202,15 @@ class VisionControlSource(ControlSource):
     def read(self) -> ControlState:
         success, frame = self.cap.read()
         if not success:
-            return ControlState(x=None, pinch=self.pinch_tracker.active, pinch_pressed=False, pinch_released=False)
+            # Keep pinch state flowing so the game loop remains consistent even
+            # if the camera momentarily hiccups.
+            return ControlState(
+                x=None,
+                pinch=self.pinch_tracker.active,
+                pinch_pressed=False,
+                pinch_released=False,
+                confidence=None,
+            )
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_frame.flags.writeable = False
@@ -198,10 +218,16 @@ class VisionControlSource(ControlSource):
 
         x_value: Optional[float]
         raw_x_for_calibration: Optional[float] = None
-        pinch_state = ControlState(x=None, pinch=self.pinch_tracker.active, pinch_pressed=False, pinch_released=False)
+        pinch_state = ControlState(
+            x=None,
+            pinch=self.pinch_tracker.active,
+            pinch_pressed=False,
+            pinch_released=False,
+            confidence=None,
+        )
 
         if results.multi_hand_landmarks and results.multi_handedness:
-            chosen, _confidence = self._pick_hand(results.multi_hand_landmarks, results.multi_handedness)
+            chosen, confidence = self._pick_hand(results.multi_hand_landmarks, results.multi_handedness)
             raw_x = (
                 self._compute_palm_center_x(chosen) if self.control_mode == "palm" else self._compute_index_tip_x(chosen)
             )
@@ -212,10 +238,13 @@ class VisionControlSource(ControlSource):
             raw_x_for_calibration = raw_x
             calibrated_x = apply_calibration(raw_x, self.calibration)
             x_value = self.smoother.update(calibrated_x)
+            if self.flip_x and x_value is not None:
+                x_value = 1.0 - x_value
 
             scale = self._compute_hand_scale(chosen)
             pinch_distance = self._compute_pinch_distance(chosen) / scale
             pinch_state = self.pinch_tracker.update(pinch_distance)
+            pinch_state.confidence = confidence
 
             # Keep the last usable x for multi-hand handoff scoring.
             if x_value is not None:
@@ -244,6 +273,7 @@ class VisionControlSource(ControlSource):
             pinch=pinch_state.pinch,
             pinch_pressed=pinch_state.pinch_pressed,
             pinch_released=pinch_state.pinch_released,
+            confidence=pinch_state.confidence,
         )
 
     def close(self) -> None:
