@@ -9,10 +9,13 @@ as a fallback for development and troubleshooting.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, List, Optional, Sequence, Tuple
 
 import pygame
+
+from src.control_types import ControlSource, ControlState
 
 
 # Basic configuration values that make the game feel responsive yet accessible.
@@ -29,6 +32,8 @@ PADDLE_Y_OFFSET = 60
 BALL_SPEED = 440  # Pixels per second.
 PADDLE_SPEED = 540  # Keyboard fallback speed in pixels per second.
 LIVES = 3
+TRAIL_LENGTH = 14
+FLASH_DURATION = 0.18
 
 
 @dataclass
@@ -109,6 +114,11 @@ class Game:
         self.bricks: List[Brick] = self._create_bricks()
         self.score = 0
         self.lives = LIVES
+        # Ball starts stuck to the paddle until the player launches it.
+        self.ball_stuck = True
+        self.ball_trail: Deque[pygame.Vector2] = deque(maxlen=TRAIL_LENGTH)
+        self.hit_flash_timer = 0.0
+        self.hit_flash_position: Optional[pygame.Vector2] = None
 
     @staticmethod
     def _create_bricks() -> List[Brick]:
@@ -143,6 +153,8 @@ class Game:
         if self.ball.rect.bottom >= SCREEN_HEIGHT:
             self.lives -= 1
             self.ball.reset(self.paddle.rect)
+            self.ball_stuck = True
+            self.ball_trail.clear()
 
     def _handle_paddle_collision(self) -> None:
         """Reflect the ball with slight angle adjustments based on impact point."""
@@ -152,6 +164,8 @@ class Game:
             angle = max(-math.pi / 3, min(math.pi / 3, overlap_center / (PADDLE_WIDTH / 2) * (math.pi / 3)))
             speed = self.ball.velocity.length() or BALL_SPEED
             self.ball.velocity = pygame.Vector2(speed * math.sin(angle), -abs(speed * math.cos(angle)))
+            self.hit_flash_position = pygame.Vector2(self.ball.position)
+            self.hit_flash_timer = FLASH_DURATION
 
     def _handle_brick_collisions(self) -> None:
         """Remove bricks on impact and bounce the ball."""
@@ -161,6 +175,8 @@ class Game:
                 self.bricks.remove(brick)
                 self.score += 10
                 self.ball.velocity.y *= -1
+                self.hit_flash_position = pygame.Vector2(brick.rect.center)
+                self.hit_flash_timer = FLASH_DURATION
                 break
 
     def _draw_hud(self) -> None:
@@ -171,24 +187,53 @@ class Game:
         self.screen.blit(score_text, (20, 12))
         self.screen.blit(lives_text, (SCREEN_WIDTH - 120, 12))
 
-    def _draw_entities(self) -> None:
+    def _draw_trail(self) -> None:
+        """Render a fading trail behind the moving ball for visual polish."""
+
+        if len(self.ball_trail) < 2:
+            return
+
+        trail_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        for i, pos in enumerate(reversed(self.ball_trail)):
+            alpha = int(255 * (1 - (i / len(self.ball_trail))))
+            radius = max(3, BALL_RADIUS - i // 2)
+            pygame.draw.circle(trail_surface, (255, 255, 255, max(30, alpha // 3)), (int(pos.x), int(pos.y)), radius)
+        self.screen.blit(trail_surface, (0, 0))
+
+    def _draw_hit_flash(self, dt: float) -> None:
+        """Draw a brief ring when the ball hits the paddle or a brick."""
+
+        if self.hit_flash_timer <= 0.0 or self.hit_flash_position is None:
+            return
+
+        t = self.hit_flash_timer / FLASH_DURATION
+        radius = int(BALL_RADIUS * (1 + (1 - t) * 4))
+        alpha = int(255 * t)
+        flash_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(
+            flash_surface,
+            (255, 220, 120, alpha),
+            (int(self.hit_flash_position.x), int(self.hit_flash_position.y)),
+            radius,
+            width=3,
+        )
+        self.screen.blit(flash_surface, (0, 0))
+        self.hit_flash_timer = max(0.0, self.hit_flash_timer - dt)
+
+    def _draw_entities(self, dt: float) -> None:
         """Clear the screen and draw bricks, paddle, and ball."""
 
         self.screen.fill((15, 15, 25))
         for brick in self.bricks:
             pygame.draw.rect(self.screen, brick.color, brick.rect, border_radius=4)
         pygame.draw.rect(self.screen, (200, 200, 200), self.paddle.rect, border_radius=4)
+        self._draw_trail()
         pygame.draw.circle(self.screen, (255, 255, 255), (int(self.ball.position.x), int(self.ball.position.y)), BALL_RADIUS)
+        self._draw_hit_flash(dt)
         self._draw_hud()
 
-    def run(self, control_source: Optional[Callable[[], Optional[float]]] = None) -> None:
-        """Main game loop.
-
-        Args:
-            control_source: Callable that returns a normalized x-position (``0..1``)
-                for the paddle each frame. If ``None`` or if the callable returns
-                ``None`` we keep the paddle still unless keyboard input is provided.
-        """
+    def run(self, control_source: Optional[ControlSource] = None) -> None:
+        """Main game loop that consumes ``ControlState`` frames."""
 
         running = True
         while running:
@@ -200,14 +245,16 @@ class Game:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
 
+            control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
             if control_source:
                 try:
-                    normalized = control_source()
+                    control_state = control_source.read()
                 except Exception:
                     # Keep the game safe even if the camera code experiences issues.
-                    normalized = None
-                if normalized is not None:
-                    self.paddle.move_to_normalized(normalized)
+                    control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
+
+            if control_state.x is not None:
+                self.paddle.move_to_normalized(control_state.x)
 
             # Keyboard fallback remains active for testing without a camera.
             keys = pygame.key.get_pressed()
@@ -219,15 +266,27 @@ class Game:
             if direction != 0.0:
                 self.paddle.move_with_keyboard(direction, dt)
 
-            self.ball.update(dt)
-            self._handle_wall_collisions()
-            self._handle_paddle_collision()
-            self._handle_brick_collisions()
+            # While stuck, keep the ball attached to the paddle and watch for launch gestures.
+            launch_requested = control_state.pinch_pressed or keys[pygame.K_SPACE]
+            if self.ball_stuck:
+                self.ball.position = pygame.Vector2(self.paddle.rect.centerx, self.paddle.rect.top - BALL_RADIUS - 2)
+                if launch_requested:
+                    self.ball_stuck = False
+                    self.ball.velocity = pygame.Vector2(BALL_SPEED * math.cos(math.pi / 4), -BALL_SPEED)
+                self.ball_trail.clear()
+            else:
+                self.ball.update(dt)
+
+            if not self.ball_stuck:
+                self._handle_wall_collisions()
+                self._handle_paddle_collision()
+                self._handle_brick_collisions()
+                self.ball_trail.append(pygame.Vector2(self.ball.position))
 
             if self.lives <= 0 or not self.bricks:
                 running = False
 
-            self._draw_entities()
+            self._draw_entities(dt)
             pygame.display.flip()
 
         self._show_end_screen()
@@ -249,4 +308,3 @@ class Game:
             self.screen.fill((0, 0, 0))
             self.screen.blit(prompt, rect)
             pygame.display.flip()
-
