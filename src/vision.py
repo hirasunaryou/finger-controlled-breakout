@@ -13,6 +13,21 @@ from src.calibration import Calibration, PersistedState, apply_calibration, load
 from src.control_types import ControlSource, ControlState, ExponentialSmoother
 from src.pinch import PinchTracker
 
+# Some Windows Python environments ship with a lightweight "mediapipe" package
+# that does not expose ``solutions`` at the top level, so we attempt a second
+# import path and keep a helpful error ready for callers.
+try:
+    from mediapipe import solutions as mp_solutions
+except Exception:
+    mp_solutions = getattr(mp, "solutions", None)
+if mp_solutions is None:
+    MP_IMPORT_ERROR = ImportError(
+        "mediapipe.solutions could not be imported. Try reinstalling mediapipe "
+        "or upgrading to 0.10.14+. (pip install --upgrade mediapipe)"
+    )
+else:
+    MP_IMPORT_ERROR = None
+
 
 class VisionControlSource(ControlSource):
     """Encapsulates OpenCV capture and MediaPipe Hands inference."""
@@ -38,7 +53,11 @@ class VisionControlSource(ControlSource):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
-        self.hands = mp.solutions.hands.Hands(
+        if MP_IMPORT_ERROR:
+            # Raise a clear, actionable error instead of the cryptic attribute error.
+            raise MP_IMPORT_ERROR
+
+        self.hands = mp_solutions.hands.Hands(
             model_complexity=0,
             max_num_hands=2,
             min_detection_confidence=min_detection_confidence,
