@@ -38,12 +38,24 @@ keep the design clean and testable.
    python -m src.main --no-camera
    ```
 
+### Stable Windows install (known-good pins)
+If you hit dependency conflicts (for example, OpenCV requesting `numpy>=2` while MediaPipe wants `<2`), use the pinned Windows requirements:
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip uninstall -y opencv-python opencv-python-headless
+python -m pip install -r requirements-windows.txt
+```
+This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother install.
+
 ## Controls
 - With camera: Move your palm left/right (default) or use index fingertip; pinch (thumb-index) to launch/relaunch. Hold pinch while catching the ball with the paddle to stick it, then release to fire.
 - Keyboard fallback: Arrow keys or `A/D` move the paddle; Space launches; holding `Space` or `Shift` catches; `Esc` quits.
+- Calibration shortcuts: Press `C` to toggle calibration mode in the debug window, and `R` to clear saved calibration.
 - Mirror input when needed: `python -m src.main --mirror`
 - Adjust smoothing if motion feels too snappy or sluggish: `python -m src.main --smoothing-alpha 0.15 --smoothing-deadzone 0.01`
-- Show the debug overlay for hand detection and FPS: `python -m src.main --show-debug-overlay`
+- Show the debug overlay (stick picture, x values, pinch state, FPS): `python -m src.main --show-debug-overlay`
 - Calibrate camera reach: run camera mode, press `C`, then follow the prompts: pinch at your leftmost comfortable point, then pinch at the rightmost point. The values save to `~/.finger_breakout.json` and load automatically.
 
 ## CLI options (examples)
@@ -54,6 +66,10 @@ keep the design clean and testable.
 - Mirror input for some camera setups:
   ```powershell
   python -m src.main --mirror
+  ```
+- Rotate or flip the camera preview if it appears upside down:
+  ```powershell
+  python -m src.main --rotate 180 --flip-y
   ```
 - Switch to index-tip control and tweak pinch hysteresis:
   ```powershell
@@ -73,9 +89,12 @@ keep the design clean and testable.
 | `--smoothing-alpha FLOAT` | `0.25` | EMA smoothing factor for hand x-position (`0-1`, higher = snappier). |
 | `--smoothing-deadzone FLOAT` | `0.01` | Ignore tiny x-changes before smoothing to reduce jitter. |
 | `--mirror` | `False` | Mirror horizontal input, useful if the paddle moves opposite your hand. |
+| `--rotate {0,90,180,270}` | `0` | Rotate the camera preview before MediaPipe inference. |
+| `--flip-x` | `False` | Flip the camera horizontally before inference. |
+| `--flip-y` | `False` | Flip the camera vertically before inference. |
 | `--pinch-on-threshold FLOAT` | `0.17` | Normalized thumb–index distance below which pinch becomes active. |
 | `--pinch-off-threshold FLOAT` | `0.22` | Normalized thumb–index distance above which pinch releases. |
-| `--show-debug-overlay` | `False` | Show a debug window with x-value, pinch state, and FPS. |
+| `--show-debug-overlay` | `False` | Show a debug window with stick picture, x values, pinch state, and FPS. |
 
 ## Project structure
 - `src/control_types.py` — shared control state dataclass, smoothing helper, and control interface.

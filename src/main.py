@@ -40,6 +40,10 @@ class KeyboardControlSource(ControlSource):
         # Keyboard-only mode has nothing to calibrate but keeps the interface uniform.
         return
 
+    def reset_calibration(self) -> None:
+        # Kept for API parity with the vision-driven control source.
+        return
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Play Breakout with your hand or keyboard.")
@@ -58,7 +62,9 @@ def main() -> None:
     )
     parser.add_argument("--control-mode", choices=["palm", "index"], default="palm", help="Use palm center or index tip.")
     parser.add_argument("--mirror", action="store_true", help="Mirror the horizontal input before calibration.")
-    parser.add_argument("--flip-x", action="store_true", help="Flip the final normalized x after smoothing (screen mirroring).")
+    parser.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0, help="Rotate the camera view before inference.")
+    parser.add_argument("--flip-x", action="store_true", help="Flip the camera horizontally before inference.")
+    parser.add_argument("--flip-y", action="store_true", help="Flip the camera vertically before inference.")
     parser.add_argument(
         "--pinch-threshold",
         type=float,
@@ -105,7 +111,9 @@ def main() -> None:
             control_source = VisionControlSource(
                 smoothing_alpha=args.smoothing_alpha,
                 mirror=args.mirror,
+                rotate=args.rotate,
                 flip_x=args.flip_x,
+                flip_y=args.flip_y,
                 control_mode=args.control_mode,
                 pinch_on_threshold=pinch_on,
                 pinch_off_threshold=pinch_off,
