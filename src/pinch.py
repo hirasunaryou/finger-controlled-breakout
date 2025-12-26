@@ -32,4 +32,12 @@ class PinchTracker:
                 pinch_released = True
 
         self.active = pinch
-        return ControlState(x=None, pinch=pinch, pinch_pressed=pinch_pressed, pinch_released=pinch_released)
+        # ``confidence`` remains ``None`` because this helper is intentionally
+        # agnostic to the upstream vision system and reused by keyboard tests.
+        return ControlState(
+            x=None,
+            pinch=pinch,
+            pinch_pressed=pinch_pressed,
+            pinch_released=pinch_released,
+            confidence=None,
+        )
