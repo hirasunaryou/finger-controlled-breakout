@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from typing import Optional
 
 import pygame
@@ -78,28 +79,32 @@ def main() -> None:
 
     persisted_state = load_state()
     game = Game(persisted_state=persisted_state)
-    control_source: Optional[ControlSource]
-    if args.no_camera:
-        control_source = KeyboardControlSource()
-    else:
-        control_source = VisionControlSource(
-            smoothing_alpha=args.smoothing_alpha,
-            mirror=args.mirror,
-            control_mode=args.control_mode,
-            pinch_on_threshold=args.pinch_on_threshold,
-            pinch_off_threshold=args.pinch_off_threshold,
-            show_debug_overlay=args.show_debug_overlay,
-            smoothing_deadzone=args.smoothing_deadzone,
-            persisted_state=persisted_state,
-        )
 
-    try:
-        game.run(control_source)
-    finally:
-        if control_source:
-            control_source.close()
+    # ExitStack keeps teardown localized and explicit without function attributes.
+    with ExitStack() as stack:
+        control_source: Optional[ControlSource]
+        if args.no_camera:
+            control_source = KeyboardControlSource()
+            stack.callback(control_source.close)
+        else:
+            # Register resource cleanup immediately so camera handles are released
+            # even if the game loop raises unexpectedly.
+            control_source = VisionControlSource(
+                smoothing_alpha=args.smoothing_alpha,
+                mirror=args.mirror,
+                control_mode=args.control_mode,
+                pinch_on_threshold=args.pinch_on_threshold,
+                pinch_off_threshold=args.pinch_off_threshold,
+                show_debug_overlay=args.show_debug_overlay,
+                smoothing_deadzone=args.smoothing_deadzone,
+                persisted_state=persisted_state,
+            )
+            stack.callback(control_source.close)
+
         # Persist best score at shutdown in case the game updated it.
-        persist_state(best_score=game.best_score)
+        stack.callback(lambda: persist_state(best_score=game.best_score))
+
+        game.run(control_source)
 
 
 if __name__ == "__main__":

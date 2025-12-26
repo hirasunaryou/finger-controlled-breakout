@@ -89,6 +89,7 @@ keep the design clean and testable.
 - Adjust smoothing to taste with `--smoothing-alpha 0.15` (lower = smoother).
 - Run calibration (`C`) if the paddle hits the wall before your hand reaches the frame edge.
 - Good lighting and keeping your hand within the frame improve detection stability.
+- If the paddle feels mirrored relative to your hand, try `--mirror` first; some webcams already flip the image, so toggling this once usually resolves it.
 - If MediaPipe wheels give trouble on Windows/Python 3.12, pin versions from `requirements.txt` and install via `python -m pip install --upgrade pip` first.
 
 ## Troubleshooting
