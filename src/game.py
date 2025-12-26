@@ -72,8 +72,12 @@ class Paddle:
         """Map normalized x (0-1) to the screen and clamp to boundaries."""
 
         clamped = max(0.0, min(1.0, normalized_x))
-        target_center = int(clamped * SCREEN_WIDTH)
-        self.rect.centerx = target_center
+        # Map to the paddle's reachable center range so 0.0 and 1.0 hit the edges
+        # without flattening the response near the walls.
+        min_cx = PADDLE_WIDTH // 2
+        max_cx = SCREEN_WIDTH - PADDLE_WIDTH // 2
+        self.rect.centerx = int(min_cx + clamped * (max_cx - min_cx))
+        # clamp_ip remains as a safety net for any rounding edge cases.
         self.rect.clamp_ip(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
 
     def move_with_keyboard(self, direction: float, dt: float) -> None:
@@ -90,7 +94,8 @@ class Ball:
     def __init__(self) -> None:
         self.position = pygame.Vector2(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
         # Slight angle so the ball is not perfectly vertical at spawn.
-        self.velocity = pygame.Vector2(BALL_SPEED * math.cos(math.pi / 4), -BALL_SPEED)
+        direction = pygame.Vector2(1, -1).normalize()
+        self.velocity = direction * BALL_SPEED
 
     @property
     def rect(self) -> pygame.Rect:
@@ -112,7 +117,8 @@ class Ball:
         """Center the ball above the paddle after a lost life."""
 
         self.position = pygame.Vector2(paddle_rect.centerx, paddle_rect.top - BALL_RADIUS - 2)
-        self.velocity = pygame.Vector2(BALL_SPEED * math.cos(math.pi / 4), -BALL_SPEED)
+        direction = pygame.Vector2(1, -1).normalize()
+        self.velocity = direction * BALL_SPEED
 
 
 class Game:
@@ -406,7 +412,9 @@ class Game:
                 if launch_requested:
                     self.ball_stuck = False
                     self.ball_caught = False
-                    self.ball.velocity = pygame.Vector2(BALL_SPEED * math.cos(math.pi / 4), -BALL_SPEED)
+                    # Launch at a 45-degree angle while preserving configured speed.
+                    launch_direction = pygame.Vector2(1, -1).normalize()
+                    self.ball.velocity = launch_direction * BALL_SPEED
                     self._play_sound("paddle")
                 self.ball_trail.clear()
             elif self.ball_caught:
