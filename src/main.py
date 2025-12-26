@@ -3,48 +3,88 @@
 from __future__ import annotations
 
 import argparse
-from typing import Callable, Optional
+from typing import Optional
 
+import pygame
+
+from src.control_types import ControlSource, ControlState
 from src.game import Game
-from src.vision import FingerTracker
+from src.vision import VisionControlSource
 
 
-def build_control_source(use_camera: bool, smoothing_alpha: float) -> Optional[Callable[[], Optional[float]]]:
-    """Create a callable that returns the normalized x-position each frame."""
+class KeyboardControlSource(ControlSource):
+    """Keyboard-only control for debugging without a camera.
 
-    if not use_camera:
-        return None
+    This source focuses on pinch emulation so that the main game loop continues
+    to receive consistent `ControlState` objects even in `--no-camera` mode.
+    """
 
-    tracker = FingerTracker(smoothing_alpha=smoothing_alpha)
+    def __init__(self) -> None:
+        self.previous_space = False
 
-    def control() -> Optional[float]:
-        return tracker.read_normalized_x()
+    def read(self) -> ControlState:
+        keys = pygame.key.get_pressed()
+        space = bool(keys[pygame.K_SPACE])
+        pinch_pressed = not self.previous_space and space
+        pinch_released = self.previous_space and not space
+        self.previous_space = space
+        return ControlState(x=None, pinch=space, pinch_pressed=pinch_pressed, pinch_released=pinch_released)
 
-    # Attach release hook so the camera closes once the game ends.
-    control.release_tracker = tracker.release  # type: ignore[attr-defined]
-    return control
+    def close(self) -> None:
+        # Nothing to clean up for keyboard-only mode.
+        return
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Play Breakout with your index finger.")
+    parser = argparse.ArgumentParser(description="Play Breakout with your hand or keyboard.")
     parser.add_argument("--no-camera", action="store_true", help="Disable camera control and rely on keyboard input.")
     parser.add_argument(
         "--smoothing-alpha",
         type=float,
         default=0.25,
-        help="EMA smoothing factor for fingertip x-position (0-1, higher = snappier).",
+        help="EMA smoothing factor for hand x-position (0-1, higher = snappier).",
+    )
+    parser.add_argument("--control-mode", choices=["palm", "index"], default="palm", help="Use palm center or index tip.")
+    parser.add_argument("--mirror", action="store_true", help="Mirror the horizontal input (useful for some cameras).")
+    parser.add_argument(
+        "--pinch-on-threshold",
+        type=float,
+        default=0.17,
+        help="Normalized pinch distance below which pinch is considered active.",
+    )
+    parser.add_argument(
+        "--pinch-off-threshold",
+        type=float,
+        default=0.22,
+        help="Normalized pinch distance above which pinch is released.",
+    )
+    parser.add_argument(
+        "--show-debug-overlay",
+        action="store_true",
+        help="Show debug info (x, pinch state, FPS) on the camera feed.",
     )
     args = parser.parse_args()
 
-    control_source = build_control_source(not args.no_camera, args.smoothing_alpha)
     game = Game()
+    control_source: Optional[ControlSource]
+    if args.no_camera:
+        control_source = KeyboardControlSource()
+    else:
+        control_source = VisionControlSource(
+            smoothing_alpha=args.smoothing_alpha,
+            mirror=args.mirror,
+            control_mode=args.control_mode,
+            pinch_on_threshold=args.pinch_on_threshold,
+            pinch_off_threshold=args.pinch_off_threshold,
+            show_debug_overlay=args.show_debug_overlay,
+        )
+
     try:
         game.run(control_source)
     finally:
-        if control_source and hasattr(control_source, "release_tracker"):
-            control_source.release_tracker()  # type: ignore[attr-defined]
+        if control_source:
+            control_source.close()
 
 
 if __name__ == "__main__":
     main()
-
