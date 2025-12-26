@@ -41,6 +41,7 @@ SHAKE_DECAY = 6.0
 PARTICLE_LIFETIME = 0.5
 PARTICLE_COUNT = 12
 PARTICLE_SPEED = 260
+STAR_COUNT = 140
 
 
 @dataclass
@@ -129,8 +130,10 @@ class Game:
         pygame.display.set_caption("Finger-Controlled Breakout")
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("arial", 24)
-        self.big_font = pygame.font.SysFont("arial", 36, bold=True)
+        # Slightly more playful fonts improve readability and fit the arcade feel.
+        self.font = pygame.font.SysFont("montserrat", 22)
+        self.big_font = pygame.font.SysFont("montserrat", 36, bold=True)
+        self.hud_font = pygame.font.SysFont("montserrat", 20, bold=True)
 
         self.paddle = Paddle()
         self.ball = Ball()
@@ -147,6 +150,10 @@ class Game:
         self.particles: List[Particle] = []
         self.shake_offset = pygame.Vector2(0, 0)
         self.shake_timer = 0.0
+        # Pre-rendered background with a light gradient and tiny stars keeps
+        # per-frame work low while making the scene feel less flat.
+        self.background = self._build_background()
+        self.fps_display = 0.0
 
         # Persistence
         self.persisted_state = persisted_state or PersistedState()
@@ -202,6 +209,32 @@ class Game:
         audio = np.int16(tone * 32767)
         return pygame.mixer.Sound(audio)
 
+    def _build_background(self) -> pygame.Surface:
+        """Generate a single gradient + star field surface for reuse each frame."""
+
+        surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        top = np.array([18, 24, 48], dtype=float)
+        bottom = np.array([8, 8, 16], dtype=float)
+        for y in range(SCREEN_HEIGHT):
+            t = y / max(1, SCREEN_HEIGHT - 1)
+            color = (top * (1 - t) + bottom * t).astype(int)
+            pygame.draw.line(surface, color.tolist(), (0, y), (SCREEN_WIDTH, y))
+
+        # Sprinkle a handful of stars; tiny rectangles are faster than circles.
+        for _ in range(STAR_COUNT):
+            x = random.randint(0, SCREEN_WIDTH - 1)
+            y = random.randint(0, SCREEN_HEIGHT - 1)
+            size = random.choice([1, 1, 2])
+            brightness = random.randint(180, 255)
+            pygame.draw.rect(surface, (brightness, brightness, 255), pygame.Rect(x, y, size, size))
+        return surface
+
+    def _lighten(self, color: Tuple[int, int, int], amount: int) -> Tuple[int, int, int]:
+        """Lift a color toward white while clamping to valid ranges."""
+
+        r, g, b = color
+        return (min(255, r + amount), min(255, g + amount), min(255, b + amount))
+
     def _handle_wall_collisions(self) -> None:
         """Bounce off screen edges and detect when the ball is lost."""
 
@@ -216,6 +249,7 @@ class Game:
             self.ball.reset(self.paddle.rect)
             self.ball_stuck = True
             self.ball_caught = False
+            self.ball.velocity.update(0, 0)
             self.ball_trail.clear()
             self._trigger_shake(intensity=10.0)
             self._play_sound("life_lost")
@@ -278,12 +312,18 @@ class Game:
         self.particles = alive
 
     def _draw_hud(self, surface: pygame.Surface) -> None:
-        """Render score and lives in the top bar."""
+        """Render score, lives, and FPS with a soft shadow for readability."""
 
-        score_text = self.font.render(f"Score: {self.score}", True, (240, 240, 240))
-        lives_text = self.font.render(f"Lives: {self.lives}", True, (240, 240, 240))
-        surface.blit(score_text, (20, 12))
-        surface.blit(lives_text, (SCREEN_WIDTH - 120, 12))
+        def draw_text(text: str, pos: Tuple[int, int]) -> None:
+            shadow = self.hud_font.render(text, True, (0, 0, 0))
+            main = self.hud_font.render(text, True, (240, 240, 255))
+            surface.blit(shadow, (pos[0] + 2, pos[1] + 2))
+            surface.blit(main, pos)
+
+        fps_text = f"{self.fps_display:5.1f} FPS"
+        draw_text(f"Score: {self.score}", (20, 12))
+        draw_text(f"Lives: {self.lives}", (SCREEN_WIDTH // 2 - 40, 12))
+        draw_text(fps_text, (SCREEN_WIDTH - 140, 12))
 
     def _draw_trail(self, surface: pygame.Surface) -> None:
         """Render a fading trail behind the moving ball for visual polish."""
@@ -318,13 +358,21 @@ class Game:
         surface.blit(flash_surface, (0, 0))
         self.hit_flash_timer = max(0.0, self.hit_flash_timer - dt)
 
+    def _draw_brick(self, canvas: pygame.Surface, brick: Brick) -> None:
+        """Render a brick with a subtle top highlight for depth."""
+
+        pygame.draw.rect(canvas, brick.color, brick.rect, border_radius=5)
+        highlight = self._lighten(brick.color, 40)
+        highlight_rect = pygame.Rect(brick.rect.x, brick.rect.y, brick.rect.width, max(4, brick.rect.height // 5))
+        pygame.draw.rect(canvas, highlight, highlight_rect, border_radius=4)
+
     def _draw_entities(self, dt: float) -> None:
         """Clear the screen and draw bricks, paddle, and ball."""
 
-        canvas = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        canvas.fill((15, 15, 25))
+        # Start from the cached background to avoid re-drawing gradients each frame.
+        canvas = self.background.copy()
         for brick in self.bricks:
-            pygame.draw.rect(canvas, brick.color, brick.rect, border_radius=4)
+            self._draw_brick(canvas, brick)
         for particle in self.particles:
             alpha = int(255 * (particle.lifetime / PARTICLE_LIFETIME))
             pygame.draw.circle(
@@ -368,6 +416,9 @@ class Game:
         running = self._show_start_screen(control_source)
         while running:
             dt = self.clock.tick(60) / 1000.0
+            # Smooth FPS readout to avoid flicker in the HUD.
+            instantaneous_fps = self.clock.get_fps() or 0.0
+            self.fps_display = 0.9 * self.fps_display + 0.1 * instantaneous_fps
             self._update_shake(dt)
             self._update_particles(dt)
 
@@ -506,15 +557,17 @@ class Game:
             if start_requested:
                 waiting = False
 
-            self.screen.fill((10, 10, 20))
-            title = self.big_font.render("Pinch or Space to Start", True, (255, 255, 255))
+            self.screen.blit(self.background, (0, 0))
+            title = self.big_font.render("Pinch or Space to Serve!", True, (255, 255, 255))
             best = self.font.render(f"Best Score: {self.best_score}", True, (210, 210, 210))
             last = self.font.render(f"Last Score: {self.last_score}", True, (180, 180, 180))
             hint = self.font.render("Press C to calibrate (camera mode)", True, (180, 220, 255))
+            tip = self.font.render("Tip: Pinch catches/launches the ball.", True, (200, 210, 255))
             self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 40)))
             self.screen.blit(best, best.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 8)))
             self.screen.blit(last, last.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 40)))
             self.screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 90)))
+            self.screen.blit(tip, tip.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 120)))
             pygame.display.flip()
         return True
 
