@@ -39,6 +39,9 @@ class ControlSource(Protocol):
     def close(self) -> None:  # pragma: no cover - protocol definition
         ...
 
+    def toggle_calibration(self) -> None:  # pragma: no cover - optional extension point
+        ...
+
 
 @dataclass
 class ExponentialSmoother:
@@ -47,11 +50,13 @@ class ExponentialSmoother:
     This helper keeps the last smoothed value so callers can continuously feed
     noisy measurements and receive a stable output. It intentionally accepts
     ``None`` samples to keep the previous value untouched when a measurement is
-    missing (e.g., hand temporarily not detected).
+    missing (e.g., hand temporarily not detected). A small configurable dead
+    zone ignores micro-jitter while remaining responsive to real motion.
     """
 
     alpha: float
     value: Optional[float] = None
+    dead_zone: float = 0.0
 
     def update(self, sample: Optional[float]) -> Optional[float]:
         """Blend ``sample`` into the EMA and return the smoothed value.
@@ -70,5 +75,9 @@ class ExponentialSmoother:
         if self.value is None:
             self.value = sample
         else:
+            # Ignore tiny changes so hand jitter does not shake the paddle.
+            delta = sample - self.value
+            if abs(delta) < self.dead_zone:
+                return self.value
             self.value = (1 - self.alpha) * self.value + self.alpha * sample
         return self.value

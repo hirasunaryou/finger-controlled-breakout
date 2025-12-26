@@ -8,6 +8,7 @@ from typing import Optional
 import pygame
 
 from src.control_types import ControlSource, ControlState
+from src.calibration import load_state, persist_state
 from src.game import Game
 from src.vision import VisionControlSource
 
@@ -34,6 +35,10 @@ class KeyboardControlSource(ControlSource):
         # Nothing to clean up for keyboard-only mode.
         return
 
+    def toggle_calibration(self) -> None:
+        # Keyboard-only mode has nothing to calibrate but keeps the interface uniform.
+        return
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Play Breakout with your hand or keyboard.")
@@ -43,6 +48,12 @@ def main() -> None:
         type=float,
         default=0.25,
         help="EMA smoothing factor for hand x-position (0-1, higher = snappier).",
+    )
+    parser.add_argument(
+        "--smoothing-deadzone",
+        type=float,
+        default=0.01,
+        help="Dead zone applied before smoothing to reduce micro jitter.",
     )
     parser.add_argument("--control-mode", choices=["palm", "index"], default="palm", help="Use palm center or index tip.")
     parser.add_argument("--mirror", action="store_true", help="Mirror the horizontal input (useful for some cameras).")
@@ -65,7 +76,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    game = Game()
+    persisted_state = load_state()
+    game = Game(persisted_state=persisted_state)
     control_source: Optional[ControlSource]
     if args.no_camera:
         control_source = KeyboardControlSource()
@@ -77,6 +89,8 @@ def main() -> None:
             pinch_on_threshold=args.pinch_on_threshold,
             pinch_off_threshold=args.pinch_off_threshold,
             show_debug_overlay=args.show_debug_overlay,
+            smoothing_deadzone=args.smoothing_deadzone,
+            persisted_state=persisted_state,
         )
 
     try:
@@ -84,6 +98,8 @@ def main() -> None:
     finally:
         if control_source:
             control_source.close()
+        # Persist best score at shutdown in case the game updated it.
+        persist_state(best_score=game.best_score)
 
 
 if __name__ == "__main__":
