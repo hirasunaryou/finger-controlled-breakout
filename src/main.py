@@ -88,6 +88,41 @@ def main() -> None:
         action="store_true",
         help="Show debug info (x, pinch state, FPS) on the camera feed.",
     )
+    parser.add_argument(
+        "--no-debug-window",
+        action="store_true",
+        help="Disable the OpenCV preview window entirely (reduces CPU usage).",
+    )
+    parser.add_argument(
+        "--hud-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for the camera debug HUD text (1.0 = default size).",
+    )
+    parser.add_argument(
+        "--hud-alpha",
+        type=int,
+        default=140,
+        help="Opacity for the HUD background panel (0-255; higher = more opaque).",
+    )
+    parser.add_argument(
+        "--camera-width",
+        type=int,
+        default=640,
+        help="Camera capture width used for both preview and inference.",
+    )
+    parser.add_argument(
+        "--camera-height",
+        type=int,
+        default=480,
+        help="Camera capture height used for both preview and inference.",
+    )
+    parser.add_argument(
+        "--inference-every",
+        type=int,
+        default=1,
+        help="Run MediaPipe inference every N frames to reduce CPU load (1 = every frame).",
+    )
     args = parser.parse_args()
 
     persisted_state = load_state()
@@ -118,8 +153,14 @@ def main() -> None:
                 pinch_on_threshold=pinch_on,
                 pinch_off_threshold=pinch_off,
                 show_debug_overlay=args.show_debug_overlay,
+                no_debug_window=args.no_debug_window,
                 smoothing_deadzone=args.smoothing_deadzone,
                 persisted_state=persisted_state,
+                hud_scale=args.hud_scale,
+                hud_alpha=args.hud_alpha,
+                camera_width=args.camera_width,
+                camera_height=args.camera_height,
+                inference_every=max(1, args.inference_every),
             )
             stack.callback(control_source.close)
 

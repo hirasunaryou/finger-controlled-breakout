@@ -38,6 +38,12 @@ keep the design clean and testable.
    python -m src.main --no-camera
    ```
 
+## Calibration (quick, step-by-step)
+1. Launch the game with your camera enabled and press `C` to enter calibration. A large HUD line will say “Step 1: Move hand to LEFT edge and PINCH.”
+2. Move your hand to the comfortable left edge of your motion and pinch (thumb + index). The HUD will confirm with “LEFT captured: ... ✅”
+3. The HUD switches to “Step 2: Move hand to RIGHT edge and PINCH.” Pinch on the right edge to capture the second point. If the right edge is too close (within `0.05`), the HUD shows an error and restarts the steps.
+4. Calibration saves automatically to `~/.finger_breakout.json`. The HUD always shows the current saved values and key help: `C` (toggle), `R` (reset), `Esc` (quit).
+
 ### Stable Windows install (known-good pins)
 If you hit dependency conflicts (for example, OpenCV requesting `numpy>=2` while MediaPipe wants `<2`), use the pinned Windows requirements:
 ```powershell
@@ -55,8 +61,10 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 - Calibration shortcuts: Press `C` to toggle calibration mode in the debug window, and `R` to clear saved calibration.
 - Mirror input when needed: `python -m src.main --mirror`
 - Adjust smoothing if motion feels too snappy or sluggish: `python -m src.main --smoothing-alpha 0.15 --smoothing-deadzone 0.01`
-- Show the debug overlay (stick picture, x values, pinch state, FPS): `python -m src.main --show-debug-overlay`
-- Calibrate camera reach: run camera mode, press `C`, then follow the prompts: pinch at your leftmost comfortable point, then pinch at the rightmost point. The values save to `~/.finger_breakout.json` and load automatically.
+- Show the debug overlay (stick picture, x values, pinch state, FPS): `python -m src.main --show-debug-overlay` (use `--no-debug-window` to disable the preview entirely).
+- Calibrate camera reach: run camera mode, press `C`, then follow the prompts: pinch at your leftmost comfortable point, then pinch at the rightmost point. The values save to `~/.finger_breakout.json` and load automatically. If the HUD complains that the span is too small, move your hand farther apart before pinching again.
+- Rotate/flip tips: `--rotate 180` when your webcam is upside down, add `--flip-x` or `--flip-y` if the mirrored view feels wrong even after `--mirror`.
+- Performance tips: lower camera resolution with `--camera-width 640 --camera-height 480`, skip some inference frames via `--inference-every 2`, or hide the preview window with `--no-debug-window`.
 
 ## CLI options (examples)
 - Force keyboard-only mode:
@@ -95,6 +103,12 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 | `--pinch-on-threshold FLOAT` | `0.17` | Normalized thumb–index distance below which pinch becomes active. |
 | `--pinch-off-threshold FLOAT` | `0.22` | Normalized thumb–index distance above which pinch releases. |
 | `--show-debug-overlay` | `False` | Show a debug window with stick picture, x values, pinch state, and FPS. |
+| `--no-debug-window` | `False` | Disable the OpenCV preview window entirely for maximum performance. |
+| `--hud-scale FLOAT` | `1.0` | Scale factor for HUD text size in the camera preview. |
+| `--hud-alpha INT` | `140` | Opacity (`0-255`) for the HUD background panel. |
+| `--camera-width INT` | `640` | Camera capture width for both preview and inference. |
+| `--camera-height INT` | `480` | Camera capture height for both preview and inference. |
+| `--inference-every INT` | `1` | Run MediaPipe inference every N frames to reduce CPU load (1 = every frame). |
 
 ## Project structure
 - `src/control_types.py` — shared control state dataclass, smoothing helper, and control interface.
@@ -118,5 +132,6 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 
 ## 簡単なまとめ (Japanese)
 - 手のひら中心がデフォルトで安定操作、指先モードも選択可能。つまむ動作でボールを開始/再開でき、キーボードでも遊べます。
-- `python -m src.main` でカメラ操作、`--no-camera` でキーボードのみ、`--mirror` や `--smoothing-alpha` で調整できます。
+- キャリブレーションは HUD に「左にピンチ→右にピンチ」と大きく表示され、成功すると ✅ が出ます。`C` で開始/終了、`R` でリセット、`Esc` で終了というキー案内も常に表示されます。
+- `python -m src.main` でカメラ操作、`--no-camera` でキーボードのみ、`--mirror` や `--smoothing-alpha` で調整できます。映像が重い場合は `--camera-width 640 --camera-height 480 --inference-every 2 --no-debug-window` で軽量化できます。
 - Windows / Python 3.12 で MediaPipe や OpenCV がうまく入らない場合は、上記の例のようにバージョンを固定して再インストールしてください。
