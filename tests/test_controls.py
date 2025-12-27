@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-from src.calibration import Calibration, apply_calibration, load_state, persist_state
+from src.calibration import AutoCalibrator, Calibration, apply_calibration, load_state, persist_state
 from src.control_types import ExponentialSmoother
 from src.pinch import PinchTracker
 
@@ -54,3 +54,21 @@ def test_persist_state_can_clear_and_keep_calibration(tmp_path: Path) -> None:
     kept = load_state(temp_file)
     assert kept.calibration is None
     assert kept.best_score == 10
+
+
+def test_auto_calibrator_maps_and_guards() -> None:
+    calibrator = AutoCalibrator(window_seconds=2.0, guard_span=0.1)
+
+    mapped, window = calibrator.map_value(0.5, now=0.0)
+    assert math.isclose(mapped, 0.5, rel_tol=1e-6)
+    assert window is not None and window.guard_active is True
+
+    mapped, window = calibrator.map_value(0.2, now=0.5)
+    # With a wide enough span, the mapping should normalize to 0.0 at the minimum.
+    assert math.isclose(mapped, 0.0, rel_tol=1e-6)
+    assert window is not None and window.guard_active is False
+
+    mapped, window = calibrator.map_value(0.4, now=2.4)
+    # The earliest sample falls out of the 2s window, so span recomputes and maps back to 1.0 while keeping the newer sample.
+    assert math.isclose(mapped, 1.0, rel_tol=1e-6)
+    assert window is not None and window.guard_active is False

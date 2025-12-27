@@ -15,7 +15,8 @@ keep the design clean and testable.
 - Keyboard controls remain available as a fallback for development or `--no-camera`.
 - Tasteful visuals: ball trail and brief hit flash on paddle/brick contact.
 - Start screen shows last/best score, with local best-score persistence.
-- Camera calibration flow (press `C`) to map your personal left/right reach.
+- Zero-calibration default: uses raw normalized x directly so you can play instantly.
+- Optional auto or manual calibration if you want the paddle to match your personal reach.
 
 ## Quick start (Windows 11 / Python 3.12)
 1. Ensure Python 3.12 and pip are installed.
@@ -38,11 +39,10 @@ keep the design clean and testable.
    python -m src.main --no-camera
    ```
 
-## Calibration (quick, step-by-step)
-1. Launch the game with your camera enabled and press `C` to enter calibration. A large HUD line will say “Step 1: Move hand to LEFT edge and PINCH.”
-2. Move your hand to the comfortable left edge of your motion and pinch (thumb + index). The HUD will confirm with “LEFT captured: ... ✅”
-3. The HUD switches to “Step 2: Move hand to RIGHT edge and PINCH.” Pinch on the right edge to capture the second point. If the right edge is too close (within `0.05`), the HUD shows an error and restarts the steps.
-4. Calibration saves automatically to `~/.finger_breakout.json`. The HUD always shows the current saved values and key help: `C` (toggle), `R` (reset), `Esc` (quit).
+## Calibration options
+- **Default (no calibration):** The paddle uses the raw normalized x position immediately. If you hit the wall before your hand reaches the frame edge, first try moving the camera or hand distance.
+- **Auto-calibration (optional):** Enable with `--auto-calib-seconds 5.0` to keep a rolling window of recent raw x values, map them into `[0, 1]`, and clamp when the observed range is too small. Set `0` to disable.
+- **Manual calibration (secondary):** Press `C` in the debug window, pinch once on your comfortable left edge and once on your right edge. Captured values show with ✅; the HUD also lists any errors (e.g., span too small) and saved values. Press `C` again to exit or `R` to clear.
 
 ### Stable Windows install (known-good pins)
 If you hit dependency conflicts (for example, OpenCV requesting `numpy>=2` while MediaPipe wants `<2`), use the pinned Windows requirements:
@@ -62,7 +62,7 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 - Mirror input when needed: `python -m src.main --mirror`
 - Adjust smoothing if motion feels too snappy or sluggish: `python -m src.main --smoothing-alpha 0.15 --smoothing-deadzone 0.01`
 - Show the debug overlay (stick picture, x values, pinch state, FPS): `python -m src.main --show-debug-overlay` (use `--no-debug-window` to disable the preview entirely).
-- Calibrate camera reach: run camera mode, press `C`, then follow the prompts: pinch at your leftmost comfortable point, then pinch at the rightmost point. The values save to `~/.finger_breakout.json` and load automatically. If the HUD complains that the span is too small, move your hand farther apart before pinching again.
+- Calibrate camera reach: by default no calibration is needed. For live auto calibration run with `--auto-calib-seconds 5.0`; for manual capture press `C` and pinch at your comfortable left/right edges (values save to `~/.finger_breakout.json` and errors show in the HUD).
 - Rotate/flip tips: `--rotate 180` when your webcam is upside down, add `--flip-x` or `--flip-y` if the mirrored view feels wrong even after `--mirror`.
 - Performance tips: lower camera resolution with `--camera-width 640 --camera-height 480`, skip some inference frames via `--inference-every 2`, or hide the preview window with `--no-debug-window`.
 
@@ -87,6 +87,10 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
   ```powershell
   python -m src.main --show-debug-overlay
   ```
+- Enable rolling auto-calibration over 5 seconds:
+  ```powershell
+  python -m src.main --auto-calib-seconds 5.0
+  ```
 
 ## CLI options (all)
 
@@ -109,6 +113,7 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 | `--camera-width INT` | `640` | Camera capture width for both preview and inference. |
 | `--camera-height INT` | `480` | Camera capture height for both preview and inference. |
 | `--inference-every INT` | `1` | Run MediaPipe inference every N frames to reduce CPU load (1 = every frame). |
+| `--auto-calib-seconds FLOAT` | `0.0` | Rolling auto-calibration window length in seconds (`>0` enables, e.g., `5.0`; `0` disables). |
 
 ## Project structure
 - `src/control_types.py` — shared control state dataclass, smoothing helper, and control interface.
@@ -120,7 +125,7 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 ## Tips
 - Use `--no-camera` to develop or play without the camera.
 - Adjust smoothing to taste with `--smoothing-alpha 0.15` (lower = smoother).
-- Run calibration (`C`) if the paddle hits the wall before your hand reaches the frame edge.
+- If the paddle hits the wall early, first adjust camera distance; optionally enable auto-calibration (`--auto-calib-seconds 5.0`) or run manual calibration with `C`.
 - Good lighting and keeping your hand within the frame improve detection stability.
 - If the paddle feels mirrored relative to your hand, try `--mirror` first; some webcams already flip the image, so toggling this once usually resolves it.
 - If MediaPipe wheels give trouble on Windows/Python 3.12, pin versions from `requirements.txt` and install via `python -m pip install --upgrade pip` first.
@@ -132,6 +137,6 @@ This set aligns MediaPipe 0.10.21, NumPy 1.26.4, and OpenCV 4.11 for a smoother 
 
 ## 簡単なまとめ (Japanese)
 - 手のひら中心がデフォルトで安定操作、指先モードも選択可能。つまむ動作でボールを開始/再開でき、キーボードでも遊べます。
-- キャリブレーションは HUD に「左にピンチ→右にピンチ」と大きく表示され、成功すると ✅ が出ます。`C` で開始/終了、`R` でリセット、`Esc` で終了というキー案内も常に表示されます。
+- デフォルトはキャリブレーションなしですぐ遊べます。必要に応じて `--auto-calib-seconds 5.0` で自動補正、`C` で手動キャリブレーション（左右でピンチすると ✅ が出る、`R` でリセット）を使えます。キー案内は HUD に常時表示、`Esc` で終了。
 - `python -m src.main` でカメラ操作、`--no-camera` でキーボードのみ、`--mirror` や `--smoothing-alpha` で調整できます。映像が重い場合は `--camera-width 640 --camera-height 480 --inference-every 2 --no-debug-window` で軽量化できます。
 - Windows / Python 3.12 で MediaPipe や OpenCV がうまく入らない場合は、上記の例のようにバージョンを固定して再インストールしてください。

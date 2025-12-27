@@ -12,7 +12,15 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from src.calibration import Calibration, PersistedState, apply_calibration, load_state, persist_state
+from src.calibration import (
+    AutoCalibrator,
+    AutoCalibrationWindow,
+    Calibration,
+    PersistedState,
+    apply_calibration,
+    load_state,
+    persist_state,
+)
 from src.control_types import ControlSource, ControlState, ExponentialSmoother
 from src.pinch import PinchTracker
 from src.ui_hud import draw_lines, draw_panel
@@ -58,6 +66,7 @@ class VisionControlSource(ControlSource):
         camera_width: int = 640,
         camera_height: int = 480,
         inference_every: int = 1,
+        auto_calib_seconds: float = 0.0,
     ) -> None:
         # Camera configuration is intentionally lightweight for laptop use.
         self.cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
@@ -97,6 +106,12 @@ class VisionControlSource(ControlSource):
         self.hud_scale = max(0.5, float(hud_scale))
         self.hud_alpha = max(0, min(255, int(hud_alpha)))
         self.inference_every = max(1, int(inference_every))
+        # Auto-calibration is optional; default gameplay uses raw normalized x.
+        auto_seconds = max(0.0, float(auto_calib_seconds))
+        self.auto_calibrator: Optional[AutoCalibrator] = (
+            AutoCalibrator(window_seconds=auto_seconds) if auto_seconds > 0 else None
+        )
+        self._auto_window: Optional[AutoCalibrationWindow] = None
         # Preparing a dedicated window name keeps calibration discoverable.
         self.window_name = "Control Debug"
         # Shared state protected by a lock so the game loop can poll without blocking.
@@ -275,14 +290,9 @@ class VisionControlSource(ControlSource):
             calibration = self.calibration
 
         if calibration_mode:
-            if left is None:
-                header = "Step 1: Move hand to LEFT edge and PINCH"
-            elif right is None:
-                header = "Step 2: Move hand to RIGHT edge and PINCH"
-            else:
-                header = "Processing calibration..."
+            header = "Manual calibration: pinch left + right edges (press C to finish)"
         else:
-            header = "Calibration idle (press C to start)"
+            header = "Manual calibration idle (press C to start)"
 
         status = []
         if left is not None:
@@ -307,6 +317,7 @@ class VisionControlSource(ControlSource):
         pinch_state: ControlState,
         detected: bool,
         landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+        auto_window: Optional[AutoCalibrationWindow],
     ) -> None:
         """Draw rich overlay so players can self-debug without reading code."""
 
@@ -363,6 +374,14 @@ class VisionControlSource(ControlSource):
         lines = []
         # Keep the most actionable status lines near the top for quick reading.
         lines.append(f"Detection: {'hand found' if detected else 'no hand'}")
+        if self.auto_calibrator:
+            if auto_window is None:
+                lines.append("Auto-calibration: warming up window...")
+            else:
+                guard_text = " (guarded; move hand wider)" if auto_window.guard_active else ""
+                lines.append(
+                    f"Auto-calibration window: min={auto_window.min_x:.3f}, max={auto_window.max_x:.3f}, span={auto_window.span:.3f}{guard_text}"
+                )
         lines.extend(calibration_lines)
         lines.append("Keys: C: toggle calibration | R: reset calibration | Esc: quit")
         lines.append(f"Raw x: {raw_x:.3f}" if raw_x is not None else "Raw x: None")
@@ -481,6 +500,7 @@ class VisionControlSource(ControlSource):
 
                 run_inference = (self._frame_count % self.inference_every) == 0
                 results = None
+                loop_time = time.time()
                 if run_inference:
                     # Downscale for inference to tame CPU spikes on lightweight laptops.
                     resized = cv2.resize(frame, (self.camera_width, self.camera_height))
@@ -497,6 +517,7 @@ class VisionControlSource(ControlSource):
                 raw_x_for_calibration = self._last_raw_x
                 calibrated_for_overlay = self._last_calibrated_x
                 smoothed_for_overlay = self._last_smoothed_x
+                auto_window = self._auto_window
                 # Start from the last sent state so skipped inference frames stay stable.
                 pinch_state = ControlState(
                     x=current_state.x,
@@ -520,7 +541,13 @@ class VisionControlSource(ControlSource):
                     raw_x = max(0.0, min(1.0, raw_x))
 
                     raw_x_for_calibration = raw_x
-                    calibrated_for_overlay = apply_calibration(raw_x, current_calibration)
+                    if self.auto_calibrator:
+                        # Auto-calibration learns the motion span continuously instead of requiring manual capture.
+                        calibrated_for_overlay, auto_window = self.auto_calibrator.map_value(raw_x, now=loop_time)
+                        # Store the latest snapshot for HUD rendering.
+                        self._auto_window = auto_window
+                    else:
+                        calibrated_for_overlay = apply_calibration(raw_x, current_calibration)
                     smoothed_for_overlay = self.smoother.update(calibrated_for_overlay)
 
                     scale = self._compute_hand_scale(chosen)
@@ -568,6 +595,7 @@ class VisionControlSource(ControlSource):
                         pinch_state,
                         detected,
                         chosen_landmarks,
+                        auto_window,
                     )
                     cv2.imshow(self.window_name, debug_frame)
                     key = cv2.waitKey(1) & 0xFF
