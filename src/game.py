@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+import textwrap
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, List, Optional, Sequence, Tuple
@@ -159,6 +160,8 @@ class Game:
         self.persisted_state = persisted_state or PersistedState()
         self.best_score = self.persisted_state.best_score
         self.last_score = self.persisted_state.last_score
+        # Surface vision failures directly in the HUD so players are not left wondering why input stopped.
+        self.vision_error: Optional[str] = None
 
         # Lightweight generated sound effects (simple sine beeps).
         self.sounds = {}
@@ -325,6 +328,22 @@ class Game:
         draw_text(f"Lives: {self.lives}", (SCREEN_WIDTH // 2 - 40, 12))
         draw_text(fps_text, (SCREEN_WIDTH - 140, 12))
 
+        if self.vision_error:
+            warning_text = f"Vision error: {self.vision_error} (press Esc). Try --no-camera."
+            wrapped = textwrap.wrap(warning_text, width=72)
+            line_height = self.hud_font.get_linesize() + 2
+            padding = 10
+            panel_width = SCREEN_WIDTH - 40
+            panel_height = padding * 2 + line_height * len(wrapped)
+            panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
+            # Semi-transparent panel so the warning remains readable over gameplay.
+            panel_surface.fill((50, 0, 0, 180))
+            surface.blit(panel_surface, (20, 46))
+            for idx, line in enumerate(wrapped):
+                text_surface = self.hud_font.render(line, True, (255, 220, 220))
+                text_y = 46 + padding + idx * line_height
+                surface.blit(text_surface, (32, text_y))
+
     def _draw_trail(self, surface: pygame.Surface) -> None:
         """Render a fading trail behind the moving ball for visual polish."""
 
@@ -445,6 +464,11 @@ class Game:
                 except Exception:
                     # Keep the game safe even if the camera code experiences issues.
                     control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
+                vision_ok = getattr(control_source, "vision_ok", True)
+                last_error = getattr(control_source, "last_error", None)
+                if not vision_ok and last_error:
+                    # Store once; repeated writes keep the first fatal reason visible.
+                    self.vision_error = self.vision_error or last_error
 
             if control_state.x is not None:
                 self.paddle.move_to_normalized(control_state.x)
@@ -547,6 +571,10 @@ class Game:
                     control_state = control_source.read()
                 except Exception:
                     control_state = ControlState(x=None, pinch=False, pinch_pressed=False, pinch_released=False)
+                vision_ok = getattr(control_source, "vision_ok", True)
+                last_error = getattr(control_source, "last_error", None)
+                if not vision_ok and last_error:
+                    self.vision_error = self.vision_error or last_error
             keys = pygame.key.get_pressed()
             if control_state.x is not None:
                 self.paddle.move_to_normalized(control_state.x)
