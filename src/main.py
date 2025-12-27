@@ -123,6 +123,12 @@ def main() -> None:
         default=1,
         help="Run MediaPipe inference every N frames to reduce CPU load (1 = every frame).",
     )
+    parser.add_argument(
+        "--auto-calib-seconds",
+        type=float,
+        default=0.0,
+        help="Enable rolling auto-calibration over N seconds (0 disables; e.g., 5.0).",
+    )
     args = parser.parse_args()
 
     persisted_state = load_state()
@@ -161,6 +167,7 @@ def main() -> None:
                 camera_width=args.camera_width,
                 camera_height=args.camera_height,
                 inference_every=max(1, args.inference_every),
+                auto_calib_seconds=args.auto_calib_seconds,
             )
             stack.callback(control_source.close)
 

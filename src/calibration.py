@@ -14,9 +14,10 @@ without a camera or pygame running.
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional, Tuple
 
 
 STATE_PATH = Path.home() / ".finger_breakout.json"
@@ -122,3 +123,61 @@ def apply_calibration(raw_x: float, calibration: Optional[Calibration]) -> float
     if calibration is None:
         return max(0.0, min(1.0, raw_x))
     return calibration.clamp_and_map(raw_x)
+
+
+@dataclass
+class AutoCalibrationWindow:
+    """Snapshot of the rolling window used for auto-calibration."""
+
+    min_x: float
+    max_x: float
+    span: float
+    guard_active: bool
+
+
+class AutoCalibrator:
+    """Rolling-window calibration that continuously rescales ``raw_x``.
+
+    The class keeps the last N seconds of raw x-values and maps the incoming
+    value into ``[0, 1]`` based on the observed min/max. When the window span
+    collapses (hand barely moving), the mapper falls back to the raw clamped
+    value instead of amplifying noise.
+    """
+
+    def __init__(self, window_seconds: float, guard_span: float = 0.05) -> None:
+        # ``deque`` keeps popping old samples O(1) as new values arrive.
+        self.window_seconds = max(0.0, float(window_seconds))
+        self.guard_span = guard_span
+        self._samples: Deque[Tuple[float, float]] = deque()
+        self.last_window: Optional[AutoCalibrationWindow] = None
+
+    def map_value(self, raw_x: float, *, now: float) -> tuple[float, Optional[AutoCalibrationWindow]]:
+        """Return the auto-calibrated x plus the latest window snapshot.
+
+        ``now`` is injected by callers for testability and to avoid extra clock
+        reads. When the observed span is too small, the method returns the
+        clamped raw value and marks ``guard_active=True`` in the window.
+        """
+
+        # Push new sample and evict anything outside the rolling window.
+        self._samples.append((now, raw_x))
+        cutoff = now - self.window_seconds
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+
+        xs = [sample for _, sample in self._samples]
+        if not xs:
+            return max(0.0, min(1.0, raw_x)), None
+
+        min_x, max_x = min(xs), max(xs)
+        span = max_x - min_x
+        # When the hand barely moves, avoid stretching noise across the whole range.
+        guard_active = span < self.guard_span
+
+        if guard_active:
+            mapped = max(0.0, min(1.0, raw_x))
+        else:
+            mapped = max(0.0, min(1.0, (raw_x - min_x) / span))
+
+        self.last_window = AutoCalibrationWindow(min_x=min_x, max_x=max_x, span=span, guard_active=guard_active)
+        return mapped, self.last_window
