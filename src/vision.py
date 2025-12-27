@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import traceback
 from typing import Optional, Sequence, Tuple
 
 import cv2
@@ -109,13 +111,18 @@ class VisionControlSource(ControlSource):
         self._state_version = 0
         self._last_read_version = -1
         # Vision loop bookkeeping; landmarks and FPS are cached to allow inference skipping.
-        self._last_landmarks: Optional[list[mp.framework.formats.landmark_pb2.NormalizedLandmark]] = None
+        self._last_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList] = None
         self._last_raw_x: Optional[float] = None
         self._last_calibrated_x: Optional[float] = None
         self._last_smoothed_x: Optional[float] = None
         self._last_detected: bool = False
         self._frame_count = 0
         self._stop_event = threading.Event()
+        # Error handling keeps the game responsive even if the vision stack crashes.
+        self._last_error: Optional[str] = None
+        self._last_error_traceback: Optional[str] = None
+        self._vision_ok = True
+        self._error_logged = False
         # Spin up the background thread so the game loop stays responsive even on heavy inference frames.
         self._vision_thread = threading.Thread(target=self._vision_loop, daemon=True)
         self._vision_thread.start()
@@ -164,29 +171,36 @@ class VisionControlSource(ControlSource):
 
         return transformed
 
-    def _compute_hand_scale(self, landmarks: list[mp.framework.formats.landmark_pb2.NormalizedLandmark]) -> float:
-        wrist = landmarks[0]
-        middle_mcp = landmarks[9]
+    def _lm(
+        self, lmlist: mp.framework.formats.landmark_pb2.NormalizedLandmarkList, idx: int
+    ) -> mp.framework.formats.landmark_pb2.NormalizedLandmark:
+        """Tiny helper to avoid accidental list-style indexing on MediaPipe objects."""
+
+        return lmlist.landmark[idx]
+
+    def _compute_hand_scale(self, landmarks: mp.framework.formats.landmark_pb2.NormalizedLandmarkList) -> float:
+        wrist = self._lm(landmarks, 0)
+        middle_mcp = self._lm(landmarks, 9)
         return float(np.linalg.norm([middle_mcp.x - wrist.x, middle_mcp.y - wrist.y])) or 1.0
 
-    def _compute_palm_center_x(self, landmarks: list[mp.framework.formats.landmark_pb2.NormalizedLandmark]) -> float:
+    def _compute_palm_center_x(self, landmarks: mp.framework.formats.landmark_pb2.NormalizedLandmarkList) -> float:
         indices = [0, 5, 9, 13, 17]
-        xs = [landmarks[i].x for i in indices]
+        xs = [self._lm(landmarks, i).x for i in indices]
         return float(np.mean(xs))
 
-    def _compute_index_tip_x(self, landmarks: list[mp.framework.formats.landmark_pb2.NormalizedLandmark]) -> float:
-        return float(landmarks[8].x)
+    def _compute_index_tip_x(self, landmarks: mp.framework.formats.landmark_pb2.NormalizedLandmarkList) -> float:
+        return float(self._lm(landmarks, 8).x)
 
-    def _compute_pinch_distance(self, landmarks: list[mp.framework.formats.landmark_pb2.NormalizedLandmark]) -> float:
-        thumb_tip = landmarks[4]
-        index_tip = landmarks[8]
+    def _compute_pinch_distance(self, landmarks: mp.framework.formats.landmark_pb2.NormalizedLandmarkList) -> float:
+        thumb_tip = self._lm(landmarks, 4)
+        index_tip = self._lm(landmarks, 8)
         return float(np.linalg.norm([thumb_tip.x - index_tip.x, thumb_tip.y - index_tip.y]))
 
     def _pick_hand(
         self,
-        hands: Sequence[list[mp.framework.formats.landmark_pb2.NormalizedLandmark]],
+        hands: Sequence[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
         handedness: Sequence[mp.framework.formats.classification_pb2.ClassificationList],
-    ) -> tuple[list[mp.framework.formats.landmark_pb2.NormalizedLandmark], float]:
+    ) -> tuple[mp.framework.formats.landmark_pb2.NormalizedLandmarkList, float]:
         """Pick the most confident or nearest-to-last hand when multiple are visible."""
 
         best_idx = 0
@@ -292,7 +306,7 @@ class VisionControlSource(ControlSource):
         smoothed_x: Optional[float],
         pinch_state: ControlState,
         detected: bool,
-        landmarks: Optional[list[mp.framework.formats.landmark_pb2.NormalizedLandmark]],
+        landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     ) -> None:
         """Draw rich overlay so players can self-debug without reading code."""
 
@@ -347,8 +361,10 @@ class VisionControlSource(ControlSource):
         # 3) Textual debug heads-up display.
         header, calibration_lines = self._build_calibration_lines()
         lines = []
-        lines.append("Keys: C: toggle calibration | R: reset calibration | Esc: quit")
+        # Keep the most actionable status lines near the top for quick reading.
+        lines.append(f"Detection: {'hand found' if detected else 'no hand'}")
         lines.extend(calibration_lines)
+        lines.append("Keys: C: toggle calibration | R: reset calibration | Esc: quit")
         lines.append(f"Raw x: {raw_x:.3f}" if raw_x is not None else "Raw x: None")
         lines.append(f"Calibrated x: {calibrated_x:.3f}" if calibrated_x is not None else "Calibrated x: None")
         lines.append(f"Smoothed x: {smoothed_x:.3f}" if smoothed_x is not None else "Smoothed x: None")
@@ -356,7 +372,6 @@ class VisionControlSource(ControlSource):
         lines.append(
             f"Confidence: {pinch_state.confidence:.2f}" if pinch_state.confidence is not None else "Confidence: n/a"
         )
-        lines.append(f"Detection: {'hand found' if detected else 'no hand'}")
 
         now = time.time()
         dt = now - self.last_time
@@ -372,23 +387,47 @@ class VisionControlSource(ControlSource):
         wrap_width = panel_width - margin * 2
         header_y = margin + int(8 * self.hud_scale)
         max_hud_lines = 12
-        panel_height = margin * 2 + (1 + max_hud_lines) * line_height
+
+        def _wrapped_line_count(entries: list[str]) -> int:
+            """Estimate how many wrapped lines will be drawn to size the panel safely."""
+
+            total = 0
+            for entry in entries:
+                words = entry.split(" ")
+                current = ""
+                for word in words:
+                    candidate = word if not current else f"{current} {word}"
+                    size, _ = cv2.getTextSize(candidate, cv2.FONT_HERSHEY_SIMPLEX, 0.65 * self.hud_scale, 1)
+                    if size[0] <= wrap_width or not current:
+                        current = candidate
+                    else:
+                        total += 1
+                        current = word
+                if current:
+                    total += 1
+            return total
+
+        wrapped_lines = _wrapped_line_count(lines)
+        visible_lines = min(max_hud_lines, wrapped_lines)
+        panel_height = margin * 2 + (1 + visible_lines) * line_height
         draw_panel(frame, 8, 8, panel_width, panel_height, alpha=self.hud_alpha)
         # Header uses a slightly larger font for clarity during calibration.
+        line_y = header_y
         cv2.putText(
             frame,
             header,
-            (8 + margin, header_y),
+            (8 + margin, line_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8 * self.hud_scale,
             (0, 255, 255),
             2,
         )
+        line_y += line_height
         draw_lines(
             frame,
             lines,
             8 + margin,
-            header_y + int(18 * self.hud_scale),
+            line_y,
             line_height,
             wrap_width,
             font_scale=0.65 * self.hud_scale,
@@ -409,6 +448,18 @@ class VisionControlSource(ControlSource):
             confidence=state.confidence,
         ), version
 
+    @property
+    def vision_ok(self) -> bool:
+        """Expose whether the vision thread is healthy so the HUD can warn users."""
+
+        return self._vision_ok
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """Most recent fatal error message captured by the vision thread, if any."""
+
+        return self._last_error
+
     def _vision_loop(self) -> None:
         """Capture frames + run inference in the background to avoid game stalls."""
 
@@ -417,114 +468,131 @@ class VisionControlSource(ControlSource):
         self._last_read_version = -1
 
         while not self._stop_event.is_set():
-            success, frame = self.cap.read()
-            if not success:
-                time.sleep(0.01)
-                continue
+            try:
+                success, frame = self.cap.read()
+                if not success:
+                    time.sleep(0.01)
+                    continue
 
-            frame = self._transform_frame(frame)
-            # Avoid copying frames unless we actually need the HUD.
-            show_window = (self.show_debug_overlay or self.calibration_mode) and not self.no_debug_window
-            debug_frame = frame.copy() if show_window else None
+                frame = self._transform_frame(frame)
+                # Avoid copying frames unless we actually need the HUD.
+                show_window = (self.show_debug_overlay or self.calibration_mode) and not self.no_debug_window
+                debug_frame = frame.copy() if show_window else None
 
-            run_inference = (self._frame_count % self.inference_every) == 0
-            results = None
-            if run_inference:
-                # Downscale for inference to tame CPU spikes on lightweight laptops.
-                resized = cv2.resize(frame, (self.camera_width, self.camera_height))
-                rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                rgb_frame.flags.writeable = False
-                results = self.hands.process(rgb_frame)
-            self._frame_count += 1
+                run_inference = (self._frame_count % self.inference_every) == 0
+                results = None
+                if run_inference:
+                    # Downscale for inference to tame CPU spikes on lightweight laptops.
+                    resized = cv2.resize(frame, (self.camera_width, self.camera_height))
+                    rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                    rgb_frame.flags.writeable = False
+                    results = self.hands.process(rgb_frame)
+                self._frame_count += 1
 
-            with self._state_lock:
-                # Cache read-only values while minimizing lock duration.
-                current_calibration = self.calibration
-                current_state = self._latest_state
+                with self._state_lock:
+                    # Cache read-only values while minimizing lock duration.
+                    current_calibration = self.calibration
+                    current_state = self._latest_state
 
-            raw_x_for_calibration = self._last_raw_x
-            calibrated_for_overlay = self._last_calibrated_x
-            smoothed_for_overlay = self._last_smoothed_x
-            # Start from the last sent state so skipped inference frames stay stable.
-            pinch_state = ControlState(
-                x=current_state.x,
-                pinch=current_state.pinch,
-                pinch_pressed=False,
-                pinch_released=False,
-                confidence=current_state.confidence,
-            )
-            chosen_landmarks = self._last_landmarks
-            detected = self._last_detected
-
-            if run_inference and results and results.multi_hand_landmarks and results.multi_handedness:
-                chosen, confidence = self._pick_hand(results.multi_hand_landmarks, results.multi_handedness)
-                raw_x = (
-                    self._compute_palm_center_x(chosen)
-                    if self.control_mode == "palm"
-                    else self._compute_index_tip_x(chosen)
+                raw_x_for_calibration = self._last_raw_x
+                calibrated_for_overlay = self._last_calibrated_x
+                smoothed_for_overlay = self._last_smoothed_x
+                # Start from the last sent state so skipped inference frames stay stable.
+                pinch_state = ControlState(
+                    x=current_state.x,
+                    pinch=current_state.pinch,
+                    pinch_pressed=False,
+                    pinch_released=False,
+                    confidence=current_state.confidence,
                 )
-                if self.mirror:
-                    raw_x = 1.0 - raw_x
-                raw_x = max(0.0, min(1.0, raw_x))
+                chosen_landmarks = self._last_landmarks
+                detected = self._last_detected
 
-                raw_x_for_calibration = raw_x
-                calibrated_for_overlay = apply_calibration(raw_x, current_calibration)
-                smoothed_for_overlay = self.smoother.update(calibrated_for_overlay)
+                if run_inference and results and results.multi_hand_landmarks and results.multi_handedness:
+                    chosen, confidence = self._pick_hand(results.multi_hand_landmarks, results.multi_handedness)
+                    raw_x = (
+                        self._compute_palm_center_x(chosen)
+                        if self.control_mode == "palm"
+                        else self._compute_index_tip_x(chosen)
+                    )
+                    if self.mirror:
+                        raw_x = 1.0 - raw_x
+                    raw_x = max(0.0, min(1.0, raw_x))
 
-                scale = self._compute_hand_scale(chosen)
-                pinch_distance = self._compute_pinch_distance(chosen) / scale
-                pinch_state = self.pinch_tracker.update(pinch_distance)
-                pinch_state.confidence = confidence
-                chosen_landmarks = chosen
-                detected = True
+                    raw_x_for_calibration = raw_x
+                    calibrated_for_overlay = apply_calibration(raw_x, current_calibration)
+                    smoothed_for_overlay = self.smoother.update(calibrated_for_overlay)
 
-                self.last_x = raw_x_for_calibration
-                self._last_landmarks = chosen_landmarks
-                self._last_detected = True
-            elif run_inference:
-                # Preserve prior EMA to avoid jumping when the hand is briefly lost.
-                smoothed_for_overlay = self.smoother.update(None)
-                pinch_state = self.pinch_tracker.update(None)
-                detected = False
-                self._last_landmarks = None
-                self._last_detected = False
+                    scale = self._compute_hand_scale(chosen)
+                    pinch_distance = self._compute_pinch_distance(chosen) / scale
+                    pinch_state = self.pinch_tracker.update(pinch_distance)
+                    pinch_state.confidence = confidence
+                    chosen_landmarks = chosen
+                    detected = True
 
-            self._last_raw_x = raw_x_for_calibration
-            self._last_calibrated_x = calibrated_for_overlay
-            self._last_smoothed_x = smoothed_for_overlay
-            self._last_detected = detected
+                    self.last_x = raw_x_for_calibration
+                    self._last_landmarks = chosen_landmarks
+                    self._last_detected = True
+                elif run_inference:
+                    # Preserve prior EMA to avoid jumping when the hand is briefly lost.
+                    smoothed_for_overlay = self.smoother.update(None)
+                    pinch_state = self.pinch_tracker.update(None)
+                    detected = False
+                    self._last_landmarks = None
+                    self._last_detected = False
 
-            self._update_calibration(pinch_state, raw_x_for_calibration)
+                self._last_raw_x = raw_x_for_calibration
+                self._last_calibrated_x = calibrated_for_overlay
+                self._last_smoothed_x = smoothed_for_overlay
+                self._last_detected = detected
 
-            new_state = ControlState(
-                x=smoothed_for_overlay,
-                pinch=pinch_state.pinch,
-                pinch_pressed=pinch_state.pinch_pressed,
-                pinch_released=pinch_state.pinch_released,
-                confidence=pinch_state.confidence,
-            )
-            with self._state_lock:
-                self._latest_state = new_state
-                self._state_version += 1
+                self._update_calibration(pinch_state, raw_x_for_calibration)
 
-            if debug_frame is not None:
-                self._overlay_debug(
-                    debug_frame,
-                    raw_x_for_calibration,
-                    calibrated_for_overlay,
-                    smoothed_for_overlay,
-                    pinch_state,
-                    detected,
-                    chosen_landmarks,
+                new_state = ControlState(
+                    x=smoothed_for_overlay,
+                    pinch=pinch_state.pinch,
+                    pinch_pressed=pinch_state.pinch_pressed,
+                    pinch_released=pinch_state.pinch_released,
+                    confidence=pinch_state.confidence,
                 )
-                cv2.imshow(self.window_name, debug_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("c"):
-                    self.toggle_calibration()
-                if key == ord("r"):
-                    self.reset_calibration()
-                if key == ord("q"):
-                    self._stop_event.set()
+                with self._state_lock:
+                    self._latest_state = new_state
+                    self._state_version += 1
+
+                if debug_frame is not None:
+                    self._overlay_debug(
+                        debug_frame,
+                        raw_x_for_calibration,
+                        calibrated_for_overlay,
+                        smoothed_for_overlay,
+                        pinch_state,
+                        detected,
+                        chosen_landmarks,
+                    )
+                    cv2.imshow(self.window_name, debug_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("c"):
+                        self.toggle_calibration()
+                    if key == ord("r"):
+                        self.reset_calibration()
+                    if key == ord("q"):
+                        self._stop_event.set()
+            except Exception as exc:  # pragma: no cover - defensive vision loop guard
+                # Surface the error to the game loop and stop the thread cleanly.
+                self._vision_ok = False
+                self._last_error = str(exc)
+                self._last_error_traceback = traceback.format_exc()
+                if not self._error_logged:
+                    print("Vision thread crashed with error:", file=sys.stderr)
+                    print(self._last_error_traceback, file=sys.stderr)
+                    self._error_logged = True
+                with self._state_lock:
+                    self._latest_state = ControlState(
+                        x=None, pinch=False, pinch_pressed=False, pinch_released=False, confidence=None
+                    )
+                    self._state_version += 1
+                self._stop_event.set()
+                break
 
         # Clean up windows if the loop exits unexpectedly.
         if self.show_debug_overlay or self.calibration_mode:
